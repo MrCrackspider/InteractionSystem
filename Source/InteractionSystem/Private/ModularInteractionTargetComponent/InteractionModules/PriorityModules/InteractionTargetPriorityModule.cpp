@@ -1,0 +1,2 @@
+#include "ModularInteractionTargetComponent/InteractionModules/PriorityModules/InteractionTargetPriorityModule.h"
+
