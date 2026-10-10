@@ -3,7 +3,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "InteractionBindingCollection.h"
+#include "PropertyBindings/InteractionBindingCollection.h"
+#include "InteractionModuleTypes.h"
 #include "PropertyBindingBindingCollectionOwner.h"
 #include "WorldConditionQuery.h"
 #include "Engine/DataAsset.h"
@@ -11,6 +12,7 @@
 #include "StructUtils/PropertyBag.h"
 #include "InteractionDefinition.generated.h"
 
+class UInteractionFunctionalModule;
 class UInteractionTargetPriorityModule;
 class UInteractorComponent;
 class UInteractionTargetComponent;
@@ -76,13 +78,37 @@ public:
 	
 	UInteractionDefinition* GetAssetVariation(const FInstancedPropertyBag& VariationParameters, UWorld* World);
 
-	float ComputePriority(const UInteractorComponent* Interactor, const UInteractionTargetComponent* InteractionTarget) const;
+	/**
+	 * Runs this definition's priority modules over one pairing.
+	 *
+	 * @return the strongest score any module gave, or an unset value when the pairing is not focusable at all: a
+	 *         Logical module vetoed it, or nothing scored above zero. The threshold lives here and nowhere else.
+	 */
+	TOptional<float> ComputePriority(const UInteractorComponent* Interactor, const UInteractionTargetComponent* InteractionTarget) const;
+
+	/**
+	 * @return indices into FunctionalModules of the modules that ask to be ticked, in authored order.
+	 *
+	 * Computed once and shared by every interaction target using this definition, so a target's tick does no
+	 * per-module filtering and never reaches a module that does not tick.
+	 */
+	const TArray<int32>& GetTickingModuleIndices() const;
+
+	/** @return the strongest tick policy across FunctionalModules, which is what the owning target has to honour. */
+	EInteractionModuleTickPolicy GetModuleTickPolicy() const;
 
 	UPROPERTY(EditDefaultsOnly, meta = (NoBinding))
 	FInstancedPropertyBag Parameters;
 
 	UPROPERTY(EditAnywhere, Instanced)
 	TArray<TObjectPtr<UInteractionTargetPriorityModule>> PriorityModules;
+
+	/**
+	 * Behaviour shared by every interaction target using this definition. Modules are const at runtime; each target
+	 * keeps its own instance data for them. @see UInteractionFunctionalModule.
+	 */
+	UPROPERTY(EditAnywhere, Instanced)
+	TArray<TObjectPtr<UInteractionFunctionalModule>> FunctionalModules;
 
 	UPROPERTY(EditDefaultsOnly, meta = (NoBinding))
 	FWorldConditionQueryDefinition Conditions;
@@ -97,9 +123,12 @@ public:
 	FInteractionBindingCollection BindingCollection;
 
 private:
-	
+
 	void ApplyParameters();
 	bool GetDataView(const FInteractionDefinitionDataHandle DataHandle, FPropertyBindingDataView& OutDataView);
+
+	/** Fills the tick cache below on first use. Modules only change in the editor, which invalidates it. */
+	void ConditionallyBuildModuleTickCache() const;
 
 #if WITH_EDITOR
 	void EnsureValidGuids();
@@ -126,4 +155,11 @@ private:
 	};
 	
 	TArray<FInteractionDefinitionAssetVariation> Variations;
+
+	/** @see GetTickingModuleIndices. Derived from FunctionalModules, so not serialized. */
+	mutable TArray<int32> TickingModuleIndices;
+
+	mutable EInteractionModuleTickPolicy ModuleTickPolicy = EInteractionModuleTickPolicy::Never;
+
+	mutable bool bModuleTickCacheBuilt = false;
 };

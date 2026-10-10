@@ -2,8 +2,11 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "InteractionWorldConditionSchema.h"
+#include "WorldConditions/InteractionWorldConditionSchema.h"
 #include "Engine/DeveloperSettings.h"
+#include "Engine/CollisionProfile.h"
+#include "Engine/EngineTypes.h"
+#include "HAL/IConsoleManager.h"
 #include "InteractionSystemDeveloperSettings.generated.h"
 
 extern TAutoConsoleVariable<bool> CVarDrawInteractionDebugCollisions;

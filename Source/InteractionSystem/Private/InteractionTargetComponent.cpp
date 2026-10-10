@@ -1,16 +1,20 @@
 #include "InteractionTargetComponent.h"
 
 #include "InteractionDefinition.h"
-#include "InteractionWorldConditionSchema.h"
-#include "InteractorManagementModule/InteractorManagementModule.h"
 #include "InteractorComponent.h"
-#include "ModularInteractionTargetComponent/InteractionModules/PriorityModules/InteractionTargetPriorityModule.h"
-#include "ModularInteractionTargetComponent/InteractionModules/FunctionalModules/InteractionFunctionalModule.h"
-#include "WorldConditionContext.h"
+#include "InteractionModules/FunctionalModules/InteractionFunctionalModule.h"
+#include "InteractorManagementModule/InteractorManagementModule.h"
+#include "Engine/World.h"
+#include "GameFramework/Actor.h"
 
 UInteractionTargetComponent::UInteractionTargetComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
+
+	// Most targets have no module that ticks. The tick is registered in BeginPlay only once the resolved
+	// definition asks for it, so the rest never enter the tick graph at all. @see UpdateModuleTickEnabled.
+	PrimaryComponentTick.bStartWithTickEnabled = false;
+
 	bAutoActivate = true;
 }
 
@@ -22,47 +26,47 @@ void UInteractionTargetComponent::BeginPlay()
 	}
 
 	CachedDefinition = Definition.GetAssetVariation(GetWorld());
-	if (CachedDefinition)
+
+	// An interactor that registered before the definition was resolved has no condition state yet.
+	for (FInteractionPerInteractorData& Data : PerInteractorData)
 	{
-		ConditionState.Initialize(*this, CachedDefinition->Conditions);
-		ActivateConditions();
+		ActivateConditions(Data);
 	}
+
+	// Before Super::BeginPlay, and before anything can dispatch an event: bAutoActivate already activated this
+	// component back at registration, so HasBegunPlay is the only thing still holding the modules back.
+	InitializeFunctionalModules();
 
 	Super::BeginPlay();
 
-	for (TObjectPtr<UInteractionFunctionalModule> Module : FunctionalModules)
-	{
-		if (Module)
-		{
-			Module->BeginPlay();
-		}
-	}
+	UpdateModuleActivation();
+	UpdateModuleTickEnabled();
 }
 
 void UInteractionTargetComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	for (TObjectPtr<UInteractionFunctionalModule> Module : FunctionalModules)
-	{
-		if (Module)
-		{
-			Module->EndPlay();
-		}
-	}
-
-	DeactivateConditions();
-
+	// Deactivate first: it notifies the modules that their interactors went away and then deactivates them, both
+	// of which need live instance data. Shutdown only drops that data afterwards.
 	Deactivate();
+
+	ShutdownFunctionalModules();
 
 	if (InteractorManagementModule)
 	{
 		InteractorManagementModule->EndPlay(this);
 	}
 
-	for	(UInteractorComponent* Interactor : Interactors)
+	// After the modules, which may still have asked about the conditions on their way out.
+	for (FInteractionPerInteractorData& Data : PerInteractorData)
 	{
-		Interactor->RemoveInteractionTarget(this);
+		DeactivateConditions(Data);
+
+		if (Data.Interactor)
+		{
+			Data.Interactor->RemoveInteractionTarget(this);
+		}
 	}
-	Interactors.Empty();
+	PerInteractorData.Empty();
 
 	Super::EndPlay(EndPlayReason);
 }
@@ -76,25 +80,41 @@ void UInteractionTargetComponent::TickComponent(float DeltaTime, ELevelTick Tick
 void UInteractionTargetComponent::Activate(bool bReset)
 {
 	Super::Activate(bReset);
-	for (const UInteractorComponent* Interactor : Interactors)
+
+	if (bReset && HasBegunPlay())
 	{
-		if (Interactor && Interactor->IsActive())
+		// A reset activation starts the modules over from the values authored on the definition.
+		ShutdownFunctionalModules();
+		InitializeFunctionalModules();
+	}
+
+	UpdateModuleActivation();
+	UpdateModuleTickEnabled();
+
+	for (const FInteractionPerInteractorData& Data : PerInteractorData)
+	{
+		if (Data.Interactor && Data.Interactor->IsActive())
 		{
-			OnInteractorAvailabilityChanged(Interactor, true);
+			OnInteractorAvailabilityChanged(Data.Interactor, true);
 		}
 	}
 }
 
 void UInteractionTargetComponent::Deactivate()
 {
-	for (const UInteractorComponent* Interactor : Interactors)
+	// Notified while the modules are still activated, so they can react before they are torn down.
+	for (const FInteractionPerInteractorData& Data : PerInteractorData)
 	{
-		if (Interactor)
+		if (Data.Interactor)
 		{
-			OnInteractorAvailabilityChanged(Interactor, false);
+			OnInteractorAvailabilityChanged(Data.Interactor, false);
 		}
 	}
+
 	Super::Deactivate();
+
+	UpdateModuleActivation();
+	UpdateModuleTickEnabled();
 }
 
 UInteractionTargetComponent* UInteractionTargetComponent::FindInteractionTarget(const AActor* InActor)
@@ -121,223 +141,330 @@ UInteractorManagementModule* UInteractionTargetComponent::SetInteractorManagemen
 	return InteractorManagementModule;
 }
 
-UInteractionTargetPriorityModule* UInteractionTargetComponent::GetPriorityModule(TSubclassOf<UInteractionTargetPriorityModule> Class) const
-{
-	if (!IsValid(Class))
-	{
-		return nullptr;
-	}
-	for (const TObjectPtr<UInteractionTargetPriorityModule> Module : PriorityModules)
-	{
-		if (Module.IsA(Class))
-		{
-			return Module;
-		}
-	}
-	return nullptr;
-}
-
-UInteractionTargetPriorityModule* UInteractionTargetComponent::AddModule(TSubclassOf<UInteractionTargetPriorityModule> Class, bool bAsStatic)
-{
-	if (!IsValid(Class))
-	{
-		return nullptr;
-	}
-
-	if (bAsStatic)
-	{
-		StaticPriorityModules.Add(Class);
-		return nullptr;
-	}
-
-	UInteractionTargetPriorityModule* NewModule = NewObject<UInteractionTargetPriorityModule>(this, Class);
-
-	check(NewModule);
-
-	PriorityModules.Add(NewModule);
-
-	return NewModule;
-}
-
 void UInteractionTargetComponent::SetEnabled(bool bNewEnabled)
 {
 	SetActive(bNewEnabled);
 }
 
-const TArray<UInteractorComponent*>& UInteractionTargetComponent::GetInteractors() const
+bool UInteractionTargetComponent::CanInteract(const UInteractorComponent* Interactor, const FInstancedStruct& Payload) const
 {
-	return Interactors;
+	if (!IsActive() || !AreConditionsMet(Interactor))
+	{
+		return false;
+	}
+
+	// Both sides of the pair, as in focus selection: the interactor's own requirements have to hold as well, and
+	// either side's may have gone false since focus was granted.
+	return Interactor == nullptr || Interactor->AreConditionsMet(this);
+}
+
+TArray<UInteractorComponent*> UInteractionTargetComponent::GetInteractors() const
+{
+	TArray<UInteractorComponent*> Result;
+	Result.Reserve(PerInteractorData.Num());
+
+	for (const FInteractionPerInteractorData& Data : PerInteractorData)
+	{
+		if (Data.Interactor)
+		{
+			Result.Add(Data.Interactor);
+		}
+	}
+
+	return Result;
 }
 
 TArray<UInteractorComponent*> UInteractionTargetComponent::GetActiveInteractors() const
 {
-	return Interactors.FilterByPredicate([](const UInteractorComponent* InteractorComponent)
+	TArray<UInteractorComponent*> Result;
+	Result.Reserve(PerInteractorData.Num());
+
+	for (const FInteractionPerInteractorData& Data : PerInteractorData)
 	{
-		return InteractorComponent && InteractorComponent->IsActive();
+		if (Data.Interactor && Data.Interactor->IsActive())
+		{
+			Result.Add(Data.Interactor);
+		}
+	}
+
+	return Result;
+}
+
+TArray<UInteractorComponent*> UInteractionTargetComponent::GetInteractingInteractors() const
+{
+	TArray<UInteractorComponent*> Result;
+
+	for (const FInteractionPerInteractorData& Data : PerInteractorData)
+	{
+		if (Data.bInteracting && Data.Interactor)
+		{
+			Result.Add(Data.Interactor);
+		}
+	}
+
+	return Result;
+}
+
+int32 UInteractionTargetComponent::GetInteractingInteractorCount() const
+{
+	int32 Count = 0;
+
+	for (const FInteractionPerInteractorData& Data : PerInteractorData)
+	{
+		Count += Data.bInteracting ? 1 : 0;
+	}
+
+	return Count;
+}
+
+bool UInteractionTargetComponent::IsInteractingWith(const UInteractorComponent* InteractorComponent) const
+{
+	const FInteractionPerInteractorData* Data = FindPerInteractorData(InteractorComponent);
+	return Data != nullptr && Data->bInteracting;
+}
+
+FInteractionPerInteractorData* UInteractionTargetComponent::FindPerInteractorData(const UInteractorComponent* InteractorComponent)
+{
+	return PerInteractorData.FindByPredicate([InteractorComponent](const FInteractionPerInteractorData& Data)
+	{
+		return Data.Interactor == InteractorComponent;
 	});
 }
 
-float UInteractionTargetComponent::RequestPriority(const UInteractorComponent* InteractorComponent) const
+const FInteractionPerInteractorData* UInteractionTargetComponent::FindPerInteractorData(const UInteractorComponent* InteractorComponent) const
 {
-	if (!IsActive() || !CachedDefinition || !AreConditionsMet(InteractorComponent))
+	return PerInteractorData.FindByPredicate([InteractorComponent](const FInteractionPerInteractorData& Data)
 	{
-		return 0.0;
-	}
-
-	// Temp fallback
-	if (CachedDefinition)
-	{
-		return CachedDefinition->ComputePriority(InteractorComponent, this);
-	}
-	else
-	{
-		return GetModulesMaxPriority(InteractorComponent);
-	}
-	
-	//return CachedDefinition->ComputePriority(InteractorComponent, this);
+		return Data.Interactor == InteractorComponent;
+	});
 }
 
-const UInteractionWorldConditionSchema* UInteractionTargetComponent::GetConditionSchema() const
+TOptional<float> UInteractionTargetComponent::RequestPriority(const UInteractorComponent* InteractorComponent) const
 {
-	if (!CachedDefinition)
+	if (!IsActive() || !AreConditionsMet(InteractorComponent))
 	{
-		return nullptr;
+		return {};
 	}
-	return Cast<UInteractionWorldConditionSchema>(CachedDefinition->Conditions.GetSchemaClass().GetDefaultObject());
+
+	// A target with no definition of its own is scored by the asking interactor's modules, so a bare interaction
+	// target dropped on an actor is still focusable. Override, not merge: a target's own definition wins outright.
+	const UInteractionDefinition* ScoringDefinition = CachedDefinition != nullptr
+		? CachedDefinition.Get()
+		: (InteractorComponent != nullptr ? InteractorComponent->GetDefinition() : nullptr);
+
+	if (ScoringDefinition == nullptr)
+	{
+		return {};
+	}
+
+	return ScoringDefinition->ComputePriority(InteractorComponent, this);
 }
 
-void UInteractionTargetComponent::ActivateConditions()
+void UInteractionTargetComponent::RecordCompletedInteraction()
 {
-	if (!ConditionState.IsInitialized() || ConditionState.AreConditionsActivated())
+	if (const UWorld* World = GetWorld())
 	{
-		return;
+		LastInteractionEndTime = World->GetTimeSeconds();
 	}
 
-	// Empty condition set: nothing to activate, treat as always passing.
-	if (ConditionState.GetNumConditions() == 0)
-	{
-		ConditionState.SetConditionsActivated(true);
-		return;
-	}
+	++CompletedInteractionCount;
 
-	const UInteractionWorldConditionSchema* Schema = GetConditionSchema();
-	if (!Schema)
-	{
-		return;
-	}
-
-	// Only persistent context data (the interaction target) is available at activation time.
-	FWorldConditionContextData ContextData(*Schema);
-	ContextData.SetContextData(Schema->GetInteractionTargetRef(), this);
-
-	const FWorldConditionContext Context(ConditionState, ContextData);
-	[[maybe_unused]] bool Temp = Context.Activate();
+	OnInteractionHistoryChangedDelegate.Broadcast();
 }
 
-void UInteractionTargetComponent::DeactivateConditions()
+void UInteractionTargetComponent::ActivateConditions(FInteractionPerInteractorData& Data)
 {
-	if (!ConditionState.IsInitialized() || !ConditionState.AreConditionsActivated())
+	if (CachedDefinition == nullptr)
 	{
 		return;
 	}
 
-	const UInteractionWorldConditionSchema* Schema = GetConditionSchema();
-	if (!Schema)
-	{
-		return;
-	}
+	Data.ConditionState.Activate(*this, CachedDefinition->Conditions, this, Data.Interactor);
+}
 
-	FWorldConditionContextData ContextData(*Schema);
-	ContextData.SetContextData(Schema->GetInteractionTargetRef(), this);
-
-	const FWorldConditionContext Context(ConditionState, ContextData);
-	Context.Deactivate();
+void UInteractionTargetComponent::DeactivateConditions(FInteractionPerInteractorData& Data)
+{
+	Data.ConditionState.Deactivate(this, Data.Interactor);
 }
 
 bool UInteractionTargetComponent::AreConditionsMet(const UInteractorComponent* InteractorComponent) const
 {
-	if (!ConditionState.IsInitialized())
+	if (CachedDefinition == nullptr)
 	{
+		// Nothing resolved to author conditions on.
 		return true;
 	}
 
-	const UInteractionWorldConditionSchema* Schema = GetConditionSchema();
-	if (!Schema)
+	const FInteractionPerInteractorData* Data = FindPerInteractorData(InteractorComponent);
+	if (Data == nullptr)
 	{
-		return true;
+		// Conditions are evaluated against the state of a registered pair, and an interactor that is not
+		// registered with this target cannot interact with it anyway.
+		return false;
 	}
 
-	FWorldConditionContextData ContextData(*Schema);
-	ContextData.SetContextData(Schema->GetInteractionTargetRef(), this);
-	ContextData.SetContextData(Schema->GetInteractorRef(), InteractorComponent);
+	// An empty condition set is initialized too and evaluates to true on its own, so an uninitialized state here
+	// means the pair was never set up rather than that there is nothing to check. Fail closed.
+	if (!ensureMsgf(Data->ConditionState.IsInitialized(),
+		TEXT("'%s' has no condition state for interactor '%s'."), *GetPathName(), *GetPathNameSafe(InteractorComponent)))
+	{
+		return false;
+	}
 
-	const FWorldConditionContext Context(ConditionState, ContextData);
-	return Context.IsTrue();
+	return Data->ConditionState.IsTrue(this, InteractorComponent);
 }
 
-float UInteractionTargetComponent::GetModulesMaxPriority(const UInteractorComponent* InteractorComponent) const
+void UInteractionTargetComponent::InitializeFunctionalModules()
 {
-	TOptional<float> ResultPriority;
+	ModuleInstanceData.Reset();
+	ModuleTickPolicy = EInteractionModuleTickPolicy::Never;
 
-	auto ComputePriorityForModule = [this, InteractorComponent](const UInteractionTargetPriorityModule* InModule, TOptional<float>& OutPriority) -> bool
+	if (CachedDefinition == nullptr)
 	{
-		float Priority = InModule->GetPriority(this, InteractorComponent);
+		return;
+	}
 
-		if (Priority <= 0.0 && InModule->HasLogicalThreshold())
-		{
-			return false;
-		}
+	const TArray<TObjectPtr<UInteractionFunctionalModule>>& Modules = CachedDefinition->FunctionalModules;
+	ModuleInstanceData.Reserve(Modules.Num());
 
-		if (InModule->Type == EInteractionModuleType::Logical)
-		{
-			return true;
-		}
-
-		float CompPriority = OutPriority.Get(0.0);
-
-		OutPriority = Priority > CompPriority ? Priority : CompPriority;
-
-		return true;
-	};
-
-	for (const UInteractionTargetPriorityModule* Module : PriorityModules)
+	// One slot per module, including the stateless and the null ones, so an index addresses the same module in the
+	// definition and in the instance data.
+	for (const TObjectPtr<UInteractionFunctionalModule>& Module : Modules)
 	{
-		if (Module)
+		ModuleInstanceData.Add(Module ? Module->CreateInstanceData() : FInstancedStruct());
+	}
+
+	ModuleTickPolicy = CachedDefinition->GetModuleTickPolicy();
+}
+
+void UInteractionTargetComponent::ShutdownFunctionalModules()
+{
+	// Deactivated before the state is dropped: this is the only chance a module has to release anything it
+	// registered elsewhere, and it needs its instance data to find it.
+	if (bModulesActivated)
+	{
+		bModulesActivated = false;
+
+		ForEachFunctionalModule([this](const UInteractionFunctionalModule& Module, FInstancedStruct& InstanceData)
 		{
-			if (!ComputePriorityForModule(Module, ResultPriority))
-			{
-				return 0.0;
-			}
+			Module.OnDeactivated(this, InstanceData);
+		});
+	}
+
+	ModuleInstanceData.Reset();
+	ModuleTickPolicy = EInteractionModuleTickPolicy::Never;
+}
+
+void UInteractionTargetComponent::UpdateModuleActivation()
+{
+	const bool bShouldBeActivated = HasBegunPlay() && IsActive() && CachedDefinition != nullptr;
+	if (bShouldBeActivated == bModulesActivated)
+	{
+		return;
+	}
+
+	bModulesActivated = bShouldBeActivated;
+
+	if (bShouldBeActivated)
+	{
+		ForEachFunctionalModule([this](const UInteractionFunctionalModule& Module, FInstancedStruct& InstanceData)
+		{
+			Module.OnActivated(this, InstanceData);
+		});
+	}
+	else
+	{
+		ForEachFunctionalModule([this](const UInteractionFunctionalModule& Module, FInstancedStruct& InstanceData)
+		{
+			Module.OnDeactivated(this, InstanceData);
+		});
+	}
+}
+
+void UInteractionTargetComponent::UpdateModuleTickEnabled()
+{
+	bool bShouldTick = false;
+
+	if (bModulesActivated)
+	{
+		switch (ModuleTickPolicy)
+		{
+		case EInteractionModuleTickPolicy::Always:
+			bShouldTick = true;
+			break;
+
+		case EInteractionModuleTickPolicy::WhenInteractorsPresent:
+			bShouldTick = !PerInteractorData.IsEmpty();
+			break;
+
+		case EInteractionModuleTickPolicy::Never:
+			break;
 		}
 	}
 
-	for (TSubclassOf<UInteractionTargetPriorityModule> ModuleClass : StaticPriorityModules)
-	{
-		if (!IsValid(ModuleClass))
-		{
-			continue;
-		}
-
-		UInteractionTargetPriorityModule* ModuleCDO = ModuleClass.GetDefaultObject();
-
-		if (!ComputePriorityForModule(ModuleCDO, ResultPriority))
-		{
-			return 0.0;
-		}
-	}
-
-	return ResultPriority.Get(1.0);
+	SetComponentTickEnabled(bShouldTick);
 }
 
 void UInteractionTargetComponent::TickFunctionalModules(float DeltaTime)
 {
-	for (TObjectPtr<UInteractionFunctionalModule> Module : FunctionalModules)
+	if (!bModulesActivated || CachedDefinition == nullptr)
 	{
-		if (Module)
+		return;
+	}
+
+	const TArray<TObjectPtr<UInteractionFunctionalModule>>& Modules = CachedDefinition->FunctionalModules;
+
+	for (const int32 Index : CachedDefinition->GetTickingModuleIndices())
+	{
+		if (!Modules.IsValidIndex(Index) || !ModuleInstanceData.IsValidIndex(Index))
 		{
-			Module->EventTick(DeltaTime);
+			continue;
+		}
+
+		if (const UInteractionFunctionalModule* Module = Modules[Index])
+		{
+			Module->OnTick(this, DeltaTime, ModuleInstanceData[Index]);
 		}
 	}
+}
+
+template <typename TInvokeModule>
+void UInteractionTargetComponent::ForEachFunctionalModule(TInvokeModule&& Invoke)
+{
+	if (CachedDefinition == nullptr)
+	{
+		return;
+	}
+
+	const TArray<TObjectPtr<UInteractionFunctionalModule>>& Modules = CachedDefinition->FunctionalModules;
+
+	// The two arrays are built together and never resized while playing. The one way they come apart is the
+	// definition being edited during play, which is not worth crashing over.
+	if (!ensureMsgf(ModuleInstanceData.Num() == Modules.Num(),
+		TEXT("'%s' holds %d module instance data slots for the %d functional modules of '%s'."),
+		*GetPathName(), ModuleInstanceData.Num(), Modules.Num(), *CachedDefinition->GetPathName()))
+	{
+		return;
+	}
+
+	for (int32 Index = 0; Index < Modules.Num(); ++Index)
+	{
+		if (const UInteractionFunctionalModule* Module = Modules[Index])
+		{
+			Invoke(*Module, ModuleInstanceData[Index]);
+		}
+	}
+}
+
+template <typename TInvokeModule>
+void UInteractionTargetComponent::DispatchToActivatedModules(TInvokeModule&& Invoke)
+{
+	if (!bModulesActivated)
+	{
+		return;
+	}
+
+	ForEachFunctionalModule(Forward<TInvokeModule>(Invoke));
 }
 
 bool UInteractionTargetComponent::AddInteractor(const AActor* NewInteractor)
@@ -349,12 +476,17 @@ bool UInteractionTargetComponent::AddInteractor(const AActor* NewInteractor)
 		return false;
 	}
 
-	if (Interactors.Contains(InteractorComp))
+	if (FindPerInteractorData(InteractorComp) != nullptr)
 	{
 		return false;
 	}
 
-	Interactors.Add(InteractorComp);
+	// Emplace, never Add: the entry is move-only so that a copy of its condition state cannot happen by accident.
+	FInteractionPerInteractorData& Data = PerInteractorData.Emplace_GetRef(InteractorComp);
+
+	// Before the interactor is told about the pairing, so the conditions can already be evaluated by the time
+	// anything reacts to it.
+	ActivateConditions(Data);
 
 	InteractorComp->AddInteractionTarget(this);
 
@@ -365,16 +497,34 @@ bool UInteractionTargetComponent::AddInteractor(const AActor* NewInteractor)
 
 bool UInteractionTargetComponent::RemoveInteractor(const AActor* NewInteractor)
 {
-	UInteractorComponent* InteractorComp = UInteractorComponent::FindInteractorComponent(NewInteractor);
+	return RemoveInteractorComponent(UInteractorComponent::FindInteractorComponent(NewInteractor));
+}
 
-	if (!IsValid(InteractorComp))
+bool UInteractionTargetComponent::RemoveInteractorComponent(UInteractorComponent* InteractorComp)
+{
+	if (InteractorComp == nullptr)
 	{
+		return false;
+	}
+
+	const int32 Index = PerInteractorData.IndexOfByPredicate([InteractorComp](const FInteractionPerInteractorData& Data)
+	{
+		return Data.Interactor == InteractorComp;
+	});
+
+	if (Index == INDEX_NONE)
+	{
+		// Not registered here. Unbinding the activation delegates and announcing the removal anyway would undo
+		// bookkeeping that was never set up for this interactor.
 		return false;
 	}
 
 	InteractorComp->RemoveInteractionTarget(this);
 
-	Interactors.RemoveSingleSwap(InteractorComp);
+	// While the entry is still alive: deactivation is what releases whatever the conditions subscribed to, and it
+	// needs the pair's state to do it.
+	DeactivateConditions(PerInteractorData[Index]);
+	PerInteractorData.RemoveAtSwap(Index);
 
 	OnInteractorRemoved(InteractorComp);
 
@@ -396,6 +546,11 @@ bool UInteractionTargetComponent::ReceiveInteractionStart(UInteractorComponent* 
 	bool bResult = CanInteract(InteractorComponent, Payload);
 	if (bResult)
 	{
+		if (FInteractionPerInteractorData* Data = FindPerInteractorData(InteractorComponent))
+		{
+			Data->bInteracting = true;
+		}
+
 		OnInteractionStarted(InteractorComponent, Payload);
 		OnInteractionStartedEvent.Broadcast(InteractorComponent);
 		OnInteractionChangedEvent.Broadcast(this, InteractorComponent, true);
@@ -409,6 +564,15 @@ bool UInteractionTargetComponent::ReceiveInteractionStart(UInteractorComponent* 
 
 void UInteractionTargetComponent::ReceiveInteractionEnd(UInteractorComponent* InteractorComponent)
 {
+	if (FInteractionPerInteractorData* Data = FindPerInteractorData(InteractorComponent))
+	{
+		Data->bInteracting = false;
+	}
+
+	// An interactor only ends an interaction it started, so this is reached once per interaction. Its pair entry may
+	// already be gone by then, during teardown, which is one reason the history hangs off the target and not the pair.
+	RecordCompletedInteraction();
+
 	OnInteractionEnded(InteractorComponent);
 	OnInteractionEndedEvent.Broadcast(InteractorComponent);
 	OnInteractionChangedEvent.Broadcast(this, InteractorComponent, false);
@@ -422,6 +586,9 @@ void UInteractionTargetComponent::OnInteractorAdded(UInteractorComponent* Intera
 	{
 		OnInteractorAvailabilityChanged(InteractorComponent, true);
 	}
+
+	// The first interactor is what starts the tick for a WhenInteractorsPresent definition.
+	UpdateModuleTickEnabled();
 }
 
 void UInteractionTargetComponent::OnInteractorRemoved(UInteractorComponent* InteractorComponent)
@@ -432,72 +599,57 @@ void UInteractionTargetComponent::OnInteractorRemoved(UInteractorComponent* Inte
 	{
 		OnInteractorAvailabilityChanged(InteractorComponent, false);
 	}
+
+	// Losing the last interactor is what stops the tick for a WhenInteractorsPresent definition.
+	UpdateModuleTickEnabled();
 }
 
 void UInteractionTargetComponent::OnFocusReceived(UInteractorComponent* InteractorComponent)
 {
-	for (TObjectPtr<UInteractionFunctionalModule> Module : FunctionalModules)
+	DispatchToActivatedModules([this, InteractorComponent](const UInteractionFunctionalModule& Module, FInstancedStruct& InstanceData)
 	{
-		if (Module)
-		{
-			Module->OnFocusReceived(InteractorComponent);
-		}
-	}
+		Module.OnFocusReceived(this, InteractorComponent, InstanceData);
+	});
 }
 
 void UInteractionTargetComponent::OnFocusLost(UInteractorComponent* InteractorComponent)
 {
-	for (TObjectPtr<UInteractionFunctionalModule> Module : FunctionalModules)
+	DispatchToActivatedModules([this, InteractorComponent](const UInteractionFunctionalModule& Module, FInstancedStruct& InstanceData)
 	{
-		if (Module)
-		{
-			Module->OnFocusLost(InteractorComponent);
-		}
-	}
+		Module.OnFocusLost(this, InteractorComponent, InstanceData);
+	});
 }
 
 void UInteractionTargetComponent::OnInteractionStarted(UInteractorComponent* InteractorComponent, const FInstancedStruct& Payload)
 {
-	for (TObjectPtr<UInteractionFunctionalModule> Module : FunctionalModules)
+	DispatchToActivatedModules([this, InteractorComponent, &Payload](const UInteractionFunctionalModule& Module, FInstancedStruct& InstanceData)
 	{
-		if (Module)
-		{
-			Module->OnInteractionStarted(InteractorComponent, Payload);
-		}
-	}
+		Module.OnInteractionStarted(this, InteractorComponent, Payload, InstanceData);
+	});
 }
 
 void UInteractionTargetComponent::OnInteractionFailed(UInteractorComponent* InteractorComponent, const FInstancedStruct& Payload)
 {
-	for (TObjectPtr<UInteractionFunctionalModule> Module : FunctionalModules)
+	DispatchToActivatedModules([this, InteractorComponent, &Payload](const UInteractionFunctionalModule& Module, FInstancedStruct& InstanceData)
 	{
-		if (Module)
-		{
-			Module->OnInteractionFailed(InteractorComponent, Payload);
-		}
-	}
+		Module.OnInteractionFailed(this, InteractorComponent, Payload, InstanceData);
+	});
 }
 
 void UInteractionTargetComponent::OnInteractionEnded(UInteractorComponent* InteractorComponent)
 {
-	for (TObjectPtr<UInteractionFunctionalModule> Module : FunctionalModules)
+	DispatchToActivatedModules([this, InteractorComponent](const UInteractionFunctionalModule& Module, FInstancedStruct& InstanceData)
 	{
-		if (Module)
-		{
-			Module->OnInteractionEnded(InteractorComponent);
-		}
-	}
+		Module.OnInteractionEnded(this, InteractorComponent, InstanceData);
+	});
 }
 
 void UInteractionTargetComponent::OnInteractorAvailabilityChanged(const UInteractorComponent* InteractorComponent, bool bAvailable)
 {
-	for (TObjectPtr<UInteractionFunctionalModule> Module : FunctionalModules)
+	DispatchToActivatedModules([this, InteractorComponent, bAvailable](const UInteractionFunctionalModule& Module, FInstancedStruct& InstanceData)
 	{
-		if (Module)
-		{
-			Module->OnInteractorAvailabilityChanged(InteractorComponent, bAvailable);
-		}
-	}
+		Module.OnInteractorAvailabilityChanged(this, InteractorComponent, bAvailable, InstanceData);
+	});
 }
 
 void UInteractionTargetComponent::OnInteractorActivated(UActorComponent* Component, bool bReset)
@@ -507,10 +659,14 @@ void UInteractionTargetComponent::OnInteractorActivated(UActorComponent* Compone
 
 void UInteractionTargetComponent::OnInteractorDeactivated(UActorComponent* Component)
 {
-	OnInteractorAvailabilityChanged(CastChecked<UInteractorComponent>(Component),  false);
-	// remove interactor just in case
+	UInteractorComponent* InteractorComponent = CastChecked<UInteractorComponent>(Component);
+
+	OnInteractorAvailabilityChanged(InteractorComponent, false);
+
+	// A destroyed interactor has to take its pair entry with it, or the entry outlives it holding an activated
+	// condition state still subscribed to the dead interactor.
 	if (Component->IsBeingDestroyed())
 	{
-		RemoveInteractor(Component->GetOwner());
+		RemoveInteractorComponent(InteractorComponent);
 	}
 }

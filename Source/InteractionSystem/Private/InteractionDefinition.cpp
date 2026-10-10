@@ -8,8 +8,11 @@
 #include "PropertyBindingTypes.h"
 #include "Serialization/ObjectAndNameAsStringProxyArchive.h"
 #include "Serialization/MemoryWriter.h"
+#include "Engine/World.h"
+#include "UObject/Package.h"
 #include "UObject/ObjectSaveContext.h"
-#include "ModularInteractionTargetComponent/InteractionModules/PriorityModules/InteractionTargetPriorityModule.h"
+#include "InteractionModules/FunctionalModules/InteractionFunctionalModule.h"
+#include "InteractionModules/PriorityModules/InteractionTargetPriorityModule.h"
 
 namespace UE::Interaction
 {
@@ -204,6 +207,12 @@ void UInteractionDefinition::PostEditChangeChainProperty(FPropertyChangedChainEv
 	if (MemberName == GET_MEMBER_NAME_CHECKED(UInteractionDefinition, Parameters))
 	{
 		UE::Interaction::Delegates::OnParametersChanged.Broadcast(*this);
+	}
+	else if (MemberName == GET_MEMBER_NAME_CHECKED(UInteractionDefinition, FunctionalModules))
+	{
+		// Adding, removing or reordering a module changes both the tick set and the index every target's instance
+		// data is keyed by, so anything already playing has to pick the new layout up.
+		bModuleTickCacheBuilt = false;
 	}
 
 	UpdatePropertyBindings();
@@ -405,11 +414,11 @@ UInteractionDefinition* UInteractionDefinition::GetAssetVariation(const FInstanc
 	return AssetVariation;
 }
 
-float UInteractionDefinition::ComputePriority(const UInteractorComponent* Interactor, const UInteractionTargetComponent* InteractionTarget) const
+TOptional<float> UInteractionDefinition::ComputePriority(const UInteractorComponent* Interactor, const UInteractionTargetComponent* InteractionTarget) const
 {
 	if (!ensure(Interactor) || !ensure(InteractionTarget))
 	{
-		return 0.0;
+		return {};
 	}
 
 	float ResultPriority = 0.0;
@@ -421,15 +430,68 @@ float UInteractionDefinition::ComputePriority(const UInteractorComponent* Intera
 			continue;
 		}
 
-		float Priority = Module->GetPriority(InteractionTarget, Interactor);
+		const float Priority = Module->GetPriority(InteractionTarget, Interactor);
 
+		// A Logical module scoring zero or less vetoes the pairing, and the loop stops there. This early-out is why
+		// a geometric test that can reject outright belongs in a module and not in a condition: a condition query
+		// evaluates every one of its conditions before merging the results.
 		if (Priority <= 0.0 && Module->HasLogicalThreshold())
 		{
-			return 0.0;
+			return {};
 		}
 
 		ResultPriority = FMath::Max(Priority, ResultPriority);
 	}
 
-	return ResultPriority;
+	// Nothing scored above zero, which is not the same as zero being the best score on offer: no module has said
+	// this pairing is worth focusing, so it is not a candidate.
+	return ResultPriority > 0.0 ? TOptional<float>(ResultPriority) : TOptional<float>();
+}
+
+const TArray<int32>& UInteractionDefinition::GetTickingModuleIndices() const
+{
+	ConditionallyBuildModuleTickCache();
+	return TickingModuleIndices;
+}
+
+EInteractionModuleTickPolicy UInteractionDefinition::GetModuleTickPolicy() const
+{
+	ConditionallyBuildModuleTickCache();
+	return ModuleTickPolicy;
+}
+
+void UInteractionDefinition::ConditionallyBuildModuleTickCache() const
+{
+	if (bModuleTickCacheBuilt)
+	{
+		return;
+	}
+
+	TickingModuleIndices.Reset();
+	ModuleTickPolicy = EInteractionModuleTickPolicy::Never;
+
+	for (int32 Index = 0; Index < FunctionalModules.Num(); ++Index)
+	{
+		const UInteractionFunctionalModule* Module = FunctionalModules[Index];
+		if (Module == nullptr)
+		{
+			continue;
+		}
+
+		const EInteractionModuleTickPolicy Policy = Module->GetTickPolicy();
+		if (Policy == EInteractionModuleTickPolicy::Never)
+		{
+			continue;
+		}
+
+		TickingModuleIndices.Add(Index);
+
+		// The enum is ordered by strength, so the target's policy is the strongest any module asks for.
+		if (Policy > ModuleTickPolicy)
+		{
+			ModuleTickPolicy = Policy;
+		}
+	}
+
+	bModuleTickCacheBuilt = true;
 }

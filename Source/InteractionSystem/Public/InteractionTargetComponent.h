@@ -1,14 +1,17 @@
 #pragma once
 #include "InteractionDefinitionReference.h"
-#include "WorldConditionQuery.h"
+#include "InteractionModuleTypes.h"
+#include "Components/SceneComponent.h"
+#include "Math/NumericLimits.h"
+#include "Misc/Optional.h"
+#include "StructUtils/InstancedStruct.h"
+#include "WorldConditions/InteractionConditionState.h"
 
 #include "InteractionTargetComponent.generated.h"
 
-struct FInstancedStruct;
 class UInteractorComponent;
 class UInteractionTargetComponent;
 class UInteractorManagementModule;
-class UInteractionTargetPriorityModule;
 class UInteractionFunctionalModule;
 class UInteractionDefinition;
 class UInteractionWorldConditionSchema;
@@ -18,10 +21,67 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FInteractionTargetEventSignature_DEP
 											const UInteractorComponent*,
 											InteractorComponent);
 
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FInteractionTargetEventSignature, 
-											const UInteractionTargetComponent*, InteractionTarget, 
-											const UInteractorComponent*, Interactor, 
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FInteractionTargetEventSignature,
+											const UInteractionTargetComponent*, InteractionTarget,
+											const UInteractorComponent*, Interactor,
 											bool, bInteractionStarted);
+
+/**
+ * Fired when an interaction target's interaction history changes.
+ *
+ * Native rather than dynamic because its subscribers are world condition states, which are plain structs and so
+ * cannot be the object half of a dynamic delegate.
+ */
+DECLARE_MULTICAST_DELEGATE(FOnInteractionHistoryChanged);
+
+/**
+ * Everything an interaction target keeps about one interactor registered with it.
+ *
+ * The pair is the unit the definition's conditions are evaluated against: each entry owns its own condition state,
+ * which is what lets the interactor be persistent context data and lets a condition cache its result and invalidate
+ * it from a change delegate instead of being re-evaluated for every candidate every tick.
+ *
+ * The entry lives exactly as long as the registration — created by AddInteractor, destroyed by RemoveInteractor —
+ * so it is also the right home for anything else that is true of the pair rather than of either side alone.
+ */
+USTRUCT()
+struct FInteractionPerInteractorData
+{
+	GENERATED_BODY()
+
+	FInteractionPerInteractorData() = default;
+
+	explicit FInteractionPerInteractorData(UInteractorComponent* InInteractor)
+		: Interactor(InInteractor)
+	{
+	}
+
+	/** Move-only, because FInteractionConditionState is. */
+	FInteractionPerInteractorData(const FInteractionPerInteractorData&) = delete;
+	FInteractionPerInteractorData& operator=(const FInteractionPerInteractorData&) = delete;
+	FInteractionPerInteractorData(FInteractionPerInteractorData&&) = default;
+	FInteractionPerInteractorData& operator=(FInteractionPerInteractorData&&) = default;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UInteractorComponent> Interactor;
+
+	/** State of the target definition's conditions for this pair. @see UInteractionTargetComponent::AreConditionsMet. */
+	UPROPERTY(Transient)
+	FInteractionConditionState ConditionState;
+
+	/** Whether this interactor is currently interacting with the owning target, as opposed to merely in range. */
+	bool bInteracting = false;
+};
+
+template<>
+struct TStructOpsTypeTraits<FInteractionPerInteractorData> : public TStructOpsTypeTraitsBase2<FInteractionPerInteractorData>
+{
+	enum
+	{
+		// The struct is move-only; without this the generated struct ops would try to copy-assign it.
+		WithCopy = false
+	};
+};
 
 /**
  * Interaction target component.
@@ -50,15 +110,9 @@ public:
 	UFUNCTION(BlueprintPure)
 	UInteractorManagementModule* GetInteractorManagementModule() const { return InteractorManagementModule; }
 
-	UFUNCTION(BlueprintPure, meta = (DeterminesOutputType = Class, DeprecatedFunction))
-	UInteractionTargetPriorityModule* GetPriorityModule(TSubclassOf<UInteractionTargetPriorityModule> Class) const;
-	
-	template<class T>
-	UE_DEPRECATED(5.7, "Priority modules will be made const and moved to interaction definition")
-	T* GetPriorityModule() const;
-
-	UFUNCTION(BlueprintCallable, meta = (DeterminesOutputType = Class, DeprecatedFunction))
-	UInteractionTargetPriorityModule* AddModule(TSubclassOf<UInteractionTargetPriorityModule> Class, bool bAsStatic = false);
+	/** @return the parameter variation of Definition resolved at BeginPlay, or null outside play. */
+	UFUNCTION(BlueprintPure)
+	const UInteractionDefinition* GetDefinition() const { return CachedDefinition; }
 
 	UFUNCTION(BlueprintCallable, meta=(DeprecatedFunction, DeprecationMessage = "Use SetActive()"))
 	void SetEnabled(bool bNewEnabled);
@@ -66,21 +120,75 @@ public:
 	UFUNCTION(BlueprintPure, meta=(DeprecatedFunction, DeprecationMessage = "Use IsActive()"))
 	bool IsEnabled() const { return IsActive(); }
 
-	UFUNCTION(BlueprintNativeEvent)
-	bool CanInteract(const UInteractorComponent* Interactor, const FInstancedStruct& Payload) const;
-
-	virtual bool CanInteract_Implementation(const UInteractorComponent* Interactor, const FInstancedStruct& Payload) const { return IsActive() && AreConditionsMet(Interactor); }
+	/**
+	 * @return whether Interactor may start an interaction with this target right now.
+	 *
+	 * Native only, deliberately. Permission is authored as world conditions on the definition, which are evaluated
+	 * per pair, cached, and invalidated by events; a Blueprint override here would be a second gate that cannot be
+	 * cached and that silently grants permission whenever it forgets to call its parent.
+	 */
+	virtual bool CanInteract(const UInteractorComponent* Interactor, const FInstancedStruct& Payload) const;
 
 	UFUNCTION(BlueprintPure)
-	const TArray<UInteractorComponent*>& GetInteractors() const;
+	TArray<UInteractorComponent*> GetInteractors() const;
 
 	UFUNCTION(BlueprintPure)
 	TArray<UInteractorComponent*> GetActiveInteractors() const;
 
-	float RequestPriority(const UInteractorComponent* InteractorComponent) const;
+	/** @return the interactors currently interacting with this target, as opposed to merely registered with it. */
+	UFUNCTION(BlueprintPure)
+	TArray<UInteractorComponent*> GetInteractingInteractors() const;
+
+	/** @return how many interactors are registered with this target. Cheaper than GetInteractors().Num(). */
+	UFUNCTION(BlueprintPure)
+	int32 GetInteractorCount() const { return PerInteractorData.Num(); }
+
+	/** @return how many interactors are interacting with this target right now. */
+	UFUNCTION(BlueprintPure)
+	int32 GetInteractingInteractorCount() const;
+
+	UFUNCTION(BlueprintPure)
+	bool IsInteractingWith(const UInteractorComponent* InteractorComponent) const;
+
+	/**
+	 * @return the world time at which the last interaction with this target ended, or a value far enough in the past
+	 *         that any cooldown measured from it has already elapsed when there has been no interaction yet.
+	 */
+	UFUNCTION(BlueprintPure)
+	double GetLastInteractionEndTime() const { return LastInteractionEndTime; }
+
+	/** @return how many interactions with this target have run to completion over its whole lifetime. */
+	UFUNCTION(BlueprintPure)
+	int32 GetCompletedInteractionCount() const { return CompletedInteractionCount; }
+
+	/**
+	 * @return the delegate fired whenever this target's interaction history changes.
+	 *
+	 * The invalidation signal for anything that caches a decision made from the history, a cooldown condition above
+	 * all: nothing else announces the change, because the history is written by this component itself.
+	 */
+	FOnInteractionHistoryChanged& OnInteractionHistoryChanged() { return OnInteractionHistoryChangedDelegate; }
+
+	/**
+	 * Scores this target for one interactor, which is what focus selection ranks candidates by.
+	 *
+	 * @return the score, or an unset value when the pairing is no candidate at all: this target is deactivated, the
+	 *         pair's conditions do not hold, there is no definition to score with, or a Logical module vetoed it.
+	 *         Unset is not a score of zero, and callers do not have to re-derive the threshold to tell them apart.
+	 */
+	TOptional<float> RequestPriority(const UInteractorComponent* InteractorComponent) const;
 
 	bool AddInteractor(const AActor* NewInteractor);
 	bool RemoveInteractor(const AActor* NewInteractor);
+
+	/**
+	 * Drops the pair with one interactor directly, without resolving it from its owning actor.
+	 *
+	 * Teardown needs this: by the time an interactor is being destroyed it may already be out of the global
+	 * interactor registry, and then resolving it by actor finds nothing and the pair would be left behind with its
+	 * conditions still subscribed.
+	 */
+	bool RemoveInteractorComponent(UInteractorComponent* InteractorComponent);
 	void ReceiveFocusReceived(UInteractorComponent* InteractorComponent);
 	void ReceiveFocusLost(UInteractorComponent* InteractorComponent);
 	bool ReceiveInteractionStart(UInteractorComponent* InteractorComponent, const FInstancedStruct& Payload);
@@ -97,12 +205,13 @@ public:
 
 protected:
 
-	float GetModulesMaxPriority(const UInteractorComponent* InteractorComponent) const;
-	
-	/** @return true if the definition's world conditions pass for the given interactor (true when there are none). */
+	/**
+	 * Evaluates the definition's conditions for one pair, against that pair's own condition state.
+	 *
+	 * @return true when the conditions pass, or when there are none to check. Fails closed on anything it cannot
+	 *         evaluate: an interactor that is not registered here, or a pair whose state was never set up.
+	 */
 	bool AreConditionsMet(const UInteractorComponent* InteractorComponent) const;
-
-	void TickFunctionalModules(float DeltaTime);
 
 	virtual void OnInteractorAdded(UInteractorComponent* InteractorComponent);
 	virtual void OnInteractorRemoved(UInteractorComponent* InteractorComponent);
@@ -125,41 +234,85 @@ protected:
 	UPROPERTY(EditAnywhere)
 	FInteractionDefinitionReference Definition;
 
-	UPROPERTY(EditAnywhere, Instanced, meta=(Deprecated))
-	TArray<TObjectPtr<UInteractionTargetPriorityModule>> PriorityModules;
-
-	UPROPERTY(EditAnywhere, meta=(Deprecated))
-	TArray<TSubclassOf<UInteractionTargetPriorityModule>> StaticPriorityModules;
-
-	UPROPERTY(EditAnywhere, Instanced)
-	TArray<TObjectPtr<UInteractionFunctionalModule>> FunctionalModules;
-
 private:
 
-	/** @return the world condition schema of the cached definition's Conditions, or null. */
-	const UInteractionWorldConditionSchema* GetConditionSchema() const;
-	
-	void ActivateConditions();
-	void DeactivateConditions();
+	/** Writes one completed interaction into the history above and announces it. */
+	void RecordCompletedInteraction();
 
-	UPROPERTY(Transient)
-	mutable FWorldConditionQueryState ConditionState;
+	/**
+	 * Activates the pair's conditions, which is where a condition reads persistent context data and subscribes for
+	 * invalidation. Does nothing until the definition has been resolved, so BeginPlay calls it again for pairs that
+	 * registered before that.
+	 */
+	void ActivateConditions(FInteractionPerInteractorData& Data);
 
+	/** Deactivates the pair's conditions, releasing whatever they subscribed to, and frees the state. */
+	void DeactivateConditions(FInteractionPerInteractorData& Data);
+
+	FInteractionPerInteractorData* FindPerInteractorData(const UInteractorComponent* InteractorComponent);
+	const FInteractionPerInteractorData* FindPerInteractorData(const UInteractorComponent* InteractorComponent) const;
+
+	/** Builds one instance data slot per module of the cached definition, in the definition's authored order. */
+	void InitializeFunctionalModules();
+
+	/** Deactivates the modules, then drops their instance data. Order matters: teardown needs live state. */
+	void ShutdownFunctionalModules();
+
+	/**
+	 * Brings the modules' activation in line with this component, firing OnActivated/OnDeactivated exactly once
+	 * each. Reconciles rather than toggling because Activate() runs at component registration, before BeginPlay has
+	 * resolved the definition, and Deactivate() runs again from EndPlay.
+	 */
+	void UpdateModuleActivation();
+
+	/** Registers this component with the tick graph only while the definition's modules ask to be ticked. */
+	void UpdateModuleTickEnabled();
+
+	void TickFunctionalModules(float DeltaTime);
+
+	/** Calls Invoke(Module, InstanceData) for every valid module of the cached definition with its own state. */
+	template <typename TInvokeModule>
+	void ForEachFunctionalModule(TInvokeModule&& Invoke);
+
+	/** As ForEachFunctionalModule, but silent while the modules are not activated. Use this for every event. */
+	template <typename TInvokeModule>
+	void DispatchToActivatedModules(TInvokeModule&& Invoke);
+
+	/** Per-target state of the definition's functional modules, index-parallel to FunctionalModules. */
 	UPROPERTY(Transient)
-	TArray<TObjectPtr<UInteractorComponent>> Interactors;
+	TArray<FInstancedStruct> ModuleInstanceData;
+
+	EInteractionModuleTickPolicy ModuleTickPolicy = EInteractionModuleTickPolicy::Never;
+
+	bool bModulesActivated = false;
+
+	/** One entry per interactor registered with this target. @see FInteractionPerInteractorData. */
+	UPROPERTY(Transient)
+	TArray<FInteractionPerInteractorData> PerInteractorData;
 
 	/** Parameterized variation of Definition resolved at BeginPlay; drives priority when set. */
 	UPROPERTY(Transient)
 	TObjectPtr<UInteractionDefinition> CachedDefinition;
-	
+
+	/**
+	 * World time at which the last interaction with this target ended. Serialized, so a target that is destroyed and
+	 * respawned by the save system keeps its history.
+	 *
+	 * Written when an interaction ends, never when one starts: a cooldown measured from the start would turn this
+	 * target's own conditions false while it is still being used, focus selection would drop it on the next tick,
+	 * and the interaction that set the cooldown would be aborted by its own side effect.
+	 */
+	UPROPERTY(VisibleAnywhere, SaveGame, Category = "InteractionTarget", AdvancedDisplay)
+	double LastInteractionEndTime = TNumericLimits<double>::Lowest();
+
+	/** How many interactions with this target have completed. Counts completions, for the reason given above. */
+	UPROPERTY(VisibleAnywhere, SaveGame, Category = "InteractionTarget", AdvancedDisplay)
+	int32 CompletedInteractionCount = 0;
+
+	FOnInteractionHistoryChanged OnInteractionHistoryChangedDelegate;
+
 	friend class UInteractorComponent;
 };
-
-template <class T>
-T* UInteractionTargetComponent::GetPriorityModule() const
-{
-    return (T*)GetPriorityModule(T::StaticClass());
-}
 
 UCLASS()
 class UModularInteractionTarget : public UInteractionTargetComponent

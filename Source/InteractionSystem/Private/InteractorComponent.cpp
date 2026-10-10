@@ -1,5 +1,6 @@
 #include "InteractorComponent.h"
 
+#include "InteractionDefinition.h"
 #include "InteractionSystem.h"
 #include "InteractionTargetComponent.h"
 
@@ -32,6 +33,19 @@ void UInteractorComponent::OnUnregister()
 		OwningPC->OnPossessedPawnChanged.RemoveDynamic(this, &UInteractorComponent::OnPossessedPawnChanged);
 	}
 	UnregisterActor(GetRegisterActor());
+}
+
+void UInteractorComponent::BeginPlay()
+{
+	CachedDefinition = Definition.GetAssetVariation(GetWorld());
+
+	// A target that registered before the definition was resolved has no condition state yet.
+	for (FInteractorPerTargetData& Data : PerTargetData)
+	{
+		ActivateConditions(Data);
+	}
+
+	Super::BeginPlay();
 }
 
 void UInteractorComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
@@ -76,14 +90,18 @@ void UInteractorComponent::StopInteraction()
 
 void UInteractorComponent::AddInteractionTarget(UInteractionTargetComponent* Target)
 {
-	if (!Target)
+	if (!Target || FindPerTargetData(Target) != nullptr)
 	{
 		return;
 	}
-	
-	InteractionTargets.Add(Target);
+
+	// Emplace, never Add: the entry is move-only so that a copy of its condition state cannot happen by accident.
+	FInteractorPerTargetData& Data = PerTargetData.Emplace_GetRef(Target);
+
+	ActivateConditions(Data);
+
 	BindToInteractionTargetActivation(Target);
-	
+
 	OnInteractionTargetAdded(Target);
 }
 
@@ -93,17 +111,94 @@ void UInteractorComponent::RemoveInteractionTarget(UInteractionTargetComponent* 
 	{
 		return;
 	}
-	
-	InteractionTargets.RemoveSwap(Target);
+
+	const int32 Index = PerTargetData.IndexOfByPredicate([Target](const FInteractorPerTargetData& Data)
+	{
+		return Data.InteractionTarget == Target;
+	});
+
+	if (Index == INDEX_NONE)
+	{
+		return;
+	}
+
+	// While the entry is still alive: deactivation is what releases whatever the conditions subscribed to.
+	DeactivateConditions(PerTargetData[Index]);
+	PerTargetData.RemoveAtSwap(Index);
 
 	if (FocusTarget == Target)
 	{
 		ChangeFocus(nullptr);
 	}
-	
+
 	UnbindFromInteractionTargetActivation(Target);
-	
+
 	OnInteractionTargetRemoved(Target);
+}
+
+TArray<UInteractionTargetComponent*> UInteractorComponent::GetInteractionTargets() const
+{
+	TArray<UInteractionTargetComponent*> Result;
+	Result.Reserve(PerTargetData.Num());
+
+	for (const FInteractorPerTargetData& Data : PerTargetData)
+	{
+		if (Data.InteractionTarget)
+		{
+			Result.Add(Data.InteractionTarget);
+		}
+	}
+
+	return Result;
+}
+
+void UInteractorComponent::ActivateConditions(FInteractorPerTargetData& Data)
+{
+	if (CachedDefinition == nullptr)
+	{
+		return;
+	}
+
+	Data.ConditionState.Activate(*this, CachedDefinition->Conditions, Data.InteractionTarget, this);
+}
+
+void UInteractorComponent::DeactivateConditions(FInteractorPerTargetData& Data)
+{
+	Data.ConditionState.Deactivate(Data.InteractionTarget, this);
+}
+
+const FInteractorPerTargetData* UInteractorComponent::FindPerTargetData(const UInteractionTargetComponent* InteractionTarget) const
+{
+	return PerTargetData.FindByPredicate([InteractionTarget](const FInteractorPerTargetData& Data)
+	{
+		return Data.InteractionTarget == InteractionTarget;
+	});
+}
+
+bool UInteractorComponent::AreConditionsMet(const UInteractionTargetComponent* InteractionTarget) const
+{
+	if (CachedDefinition == nullptr)
+	{
+		// Nothing resolved to author conditions on.
+		return true;
+	}
+
+	const FInteractorPerTargetData* Data = FindPerTargetData(InteractionTarget);
+	if (Data == nullptr)
+	{
+		// Conditions are evaluated against the state of a registered pair.
+		return false;
+	}
+
+	// An empty condition set is initialized too and evaluates to true on its own, so an uninitialized state here
+	// means the pair was never set up rather than that there is nothing to check. Fail closed.
+	if (!ensureMsgf(Data->ConditionState.IsInitialized(),
+		TEXT("'%s' has no condition state for interaction target '%s'."), *GetPathName(), *GetPathNameSafe(InteractionTarget)))
+	{
+		return false;
+	}
+
+	return Data->ConditionState.IsTrue(InteractionTarget, this);
 }
 
 UInteractorComponent* UInteractorComponent::FindInteractorComponent(const AActor* InInteractor)
@@ -144,35 +239,40 @@ void UInteractorComponent::OnPossessedPawnChanged(APawn* OldPawn, APawn* NewPawn
 
 UInteractionTargetComponent* UInteractorComponent::GetInteractionTargetWithMaxPriority() const
 {
-	float MaxPriority = 0.0;
+	TOptional<float> MaxPriority;
 	UInteractionTargetComponent* OutInteractionTarget = nullptr;
-	
-	for (UInteractionTargetComponent* InteractionTarget : InteractionTargets)
+
+	for (const FInteractorPerTargetData& Data : PerTargetData)
 	{
+		UInteractionTargetComponent* InteractionTarget = Data.InteractionTarget;
+
 		if (!IsValid(InteractionTarget))
 		{
 			continue;
 		}
 
-		float Priority = InteractionTarget->RequestPriority(this);
+		// A pairing has to satisfy both sides: this interactor's own requirements, and the target's.
+		if (!AreConditionsMet(InteractionTarget))
+		{
+			continue;
+		}
+
+		const TOptional<float> Priority = InteractionTarget->RequestPriority(this);
 
 		if (const AActor* Actor = GetRegisterActor())
 		{
-			UE_VLOG_ARROW(this, LogInteractionSystem, Display, Actor->GetActorLocation(), InteractionTarget->GetComponentLocation(), FColor::Blue, TEXT("%.2f"), Priority);
+			UE_VLOG_ARROW(this, LogInteractionSystem, Display, Actor->GetActorLocation(), InteractionTarget->GetComponentLocation(),
+				Priority.IsSet() ? FColor::Blue : FColor::Red, TEXT("%.2f"), Priority.Get(0.0f));
 		}
-		
-		if (Priority > 0.0 && Priority > MaxPriority)
+
+		// Whether a target is a candidate at all is the target's own answer; all that is left here is ranking.
+		if (Priority.IsSet() && (!MaxPriority.IsSet() || Priority.GetValue() > MaxPriority.GetValue()))
 		{
 			MaxPriority = Priority;
 			OutInteractionTarget = InteractionTarget;
 		}
 	}
 
-	if (MaxPriority <= 0.0)
-	{
-		return nullptr;
-	}
-	
 	return OutInteractionTarget;
 }
 
@@ -264,14 +364,16 @@ APawn* UInteractorComponent::GetControlledPawn() const
 
 void UInteractorComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	for (UInteractionTargetComponent* InteractionTarget : InteractionTargets)
+	for (FInteractorPerTargetData& Data : PerTargetData)
 	{
-		if (InteractionTarget)
+		DeactivateConditions(Data);
+
+		if (Data.InteractionTarget)
 		{
-			UnbindFromInteractionTargetActivation(InteractionTarget);
+			UnbindFromInteractionTargetActivation(Data.InteractionTarget);
 		}
 	}
-	InteractionTargets.Empty();
+	PerTargetData.Empty();
 	Deactivate();
 	Super::EndPlay(EndPlayReason);
 }
