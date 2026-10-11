@@ -3,7 +3,12 @@
 
 #include "InteractionDefinitionDetails.h"
 #include "InteractionDefinitionReferenceDetails.h"
+#include "InteractionTargetComponent.h"
+#include "InteractionTargetComponentVisualizer.h"
 #include "PropertyEditorModule.h"
+#include "UnrealEdGlobals.h"
+#include "Editor/UnrealEdEngine.h"
+#include "Misc/CoreDelegates.h"
 
 #define LOCTEXT_NAMESPACE "FInteractionSystemEditorModule"
 
@@ -19,16 +24,62 @@ void FInteractionSystemEditorModule::StartupModule()
 	PropertyModule.RegisterCustomClassLayout("InteractionDefinition",
 		FOnGetDetailCustomizationInstance::CreateStatic(&FInteractionDefinitionDetails::MakeInstance));
 	PropertyModule.NotifyCustomizationModuleChanged();
+
+	// At the Default loading phase GUnrealEd is not created yet (LaunchEngineLoop loads startup modules in PreInit and
+	// creates the editor engine in Init). It does exist when the module is loaded later, e.g. by enabling the plugin.
+	if (GUnrealEd != nullptr)
+	{
+		RegisterComponentVisualizers();
+	}
+	else
+	{
+		FCoreDelegates::OnPostEngineInit.AddRaw(this, &FInteractionSystemEditorModule::RegisterComponentVisualizers);
+	}
 }
 
 void FInteractionSystemEditorModule::ShutdownModule()
 {
+	FCoreDelegates::OnPostEngineInit.RemoveAll(this);
+	UnregisterComponentVisualizers();
+
 	if (FPropertyEditorModule* PropertyModule = FModuleManager::GetModulePtr<FPropertyEditorModule>("PropertyEditor"))
 	{
 		PropertyModule->UnregisterCustomPropertyTypeLayout("InteractionDefinitionReference");
 		PropertyModule->UnregisterCustomClassLayout("InteractionDefinition");
 		PropertyModule->NotifyCustomizationModuleChanged();
 	}
+}
+
+void FInteractionSystemEditorModule::RegisterComponentVisualizers()
+{
+	// Still null in an editor build running as a game or a commandlet without the editor engine.
+	if (GUnrealEd == nullptr)
+	{
+		return;
+	}
+
+	// Registered on the base class: the editor walks up the class hierarchy to find a visualizer, so Blueprint and
+	// native subclasses of the target are covered too.
+	const FName ClassName = UInteractionTargetComponent::StaticClass()->GetFName();
+	const TSharedRef<FComponentVisualizer> Visualizer = MakeShared<FInteractionTargetComponentVisualizer>();
+
+	GUnrealEd->RegisterComponentVisualizer(ClassName, Visualizer);
+	Visualizer->OnRegister();
+
+	RegisteredVisualizerClassNames.Add(ClassName);
+}
+
+void FInteractionSystemEditorModule::UnregisterComponentVisualizers()
+{
+	if (GUnrealEd != nullptr)
+	{
+		for (const FName ClassName : RegisteredVisualizerClassNames)
+		{
+			GUnrealEd->UnregisterComponentVisualizer(ClassName);
+		}
+	}
+
+	RegisteredVisualizerClassNames.Reset();
 }
 
 #undef LOCTEXT_NAMESPACE

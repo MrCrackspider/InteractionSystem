@@ -22,8 +22,10 @@ UInteractionWorldConditionSchema::UInteractionWorldConditionSchema(const FObject
 bool UInteractionWorldConditionSchema::IsStructAllowed(const UScriptStruct* InScriptStruct) const
 {
 	check(InScriptStruct);
+
+	// Interaction conditions only. This is also what filters the editor's condition picker: the world condition
+	// customization asks the query's schema, and there is no property metadata for it. The engine's common bases
+	// are left out on purpose; an actor condition reads an AActor context this schema does not provide.
 	return Super::IsStructAllowed(InScriptStruct)
-		|| InScriptStruct->IsChildOf(TBaseStructure<FWorldConditionCommonBase>::Get())
-		|| InScriptStruct->IsChildOf(TBaseStructure<FWorldConditionCommonActorBase>::Get())
 		|| InScriptStruct->IsChildOf(TBaseStructure<FInteractionWorldConditionBase>::Get());
 }

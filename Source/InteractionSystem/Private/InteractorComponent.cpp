@@ -3,8 +3,10 @@
 #include "InteractionDefinition.h"
 #include "InteractionSystem.h"
 #include "InteractionTargetComponent.h"
-
-TMap<const AActor*, UInteractorComponent*> UInteractorComponent::GlobalRegisteredInteractors{};
+#include "Engine/World.h"
+#include "GameFramework/Pawn.h"
+#include "GameFramework/PlayerController.h"
+#include "VisualLogger/VisualLogger.h"
 
 UInteractorComponent::UInteractorComponent()
 {
@@ -12,27 +14,6 @@ UInteractorComponent::UInteractorComponent()
 	PrimaryComponentTick.bStartWithTickEnabled = bAutoActivate;
 	bWantsInitializeComponent = true;
 	bAutoActivate = true;
-}
-
-void UInteractorComponent::OnRegister()
-{
-	Super::OnRegister();
-	OwningPC = GetOwner<APlayerController>();
-	if (OwningPC)
-	{
-		OwningPC->OnPossessedPawnChanged.AddDynamic(this, &UInteractorComponent::OnPossessedPawnChanged);
-	}
-	RegisterActor(GetRegisterActor());
-}
-
-void UInteractorComponent::OnUnregister()
-{
-	Super::OnUnregister();
-	if (OwningPC)
-	{
-		OwningPC->OnPossessedPawnChanged.RemoveDynamic(this, &UInteractorComponent::OnPossessedPawnChanged);
-	}
-	UnregisterActor(GetRegisterActor());
 }
 
 void UInteractorComponent::BeginPlay()
@@ -45,7 +26,48 @@ void UInteractorComponent::BeginPlay()
 		ActivateConditions(Data);
 	}
 
+	if (AController* Controller = GetOwner<AController>())
+	{
+		Controller->OnPossessedPawnChanged.AddUniqueDynamic(this, &ThisClass::HandlePossessedPawnChanged);
+	}
+
 	Super::BeginPlay();
+}
+
+void UInteractorComponent::HandlePossessedPawnChanged(APawn* OldPawn, APawn* NewPawn)
+{
+	// The pairs belong to the old pawn's position, and their conditions read the old pawn. Its end-overlaps, when they
+	// come, resolve to nothing: it has no controller any more.
+	RemoveAllInteractionTargets();
+
+	if (NewPawn == nullptr)
+	{
+		return;
+	}
+
+	// Overlaps the new pawn already has produced their begin events before it was this interactor's, so they are
+	// asked for again. Every volume a target manages belongs to the target's own actor, which is what overlaps.
+	TArray<AActor*> OverlappingActors;
+	NewPawn->GetOverlappingActors(OverlappingActors);
+
+	TInlineComponentArray<UInteractionTargetComponent*> Targets;
+	for (const AActor* Actor : OverlappingActors)
+	{
+		Actor->GetComponents(Targets);
+		for (UInteractionTargetComponent* Target : Targets)
+		{
+			Target->AddInteractorIfInRange(*this);
+		}
+	}
+}
+
+void UInteractorComponent::RemoveAllInteractionTargets()
+{
+	// Removing a pair edits PerTargetData, so walk a copy.
+	for (UInteractionTargetComponent* Target : GetInteractionTargets())
+	{
+		Target->RemoveInteractorComponent(this);
+	}
 }
 
 void UInteractorComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
@@ -60,32 +82,40 @@ void UInteractorComponent::TickComponent(float DeltaTime, ELevelTick TickType, F
 
 AActor* UInteractorComponent::GetRegisterActor() const
 {
-	return OwningPC ? OwningPC->GetPawn() : GetOwner();
+	const AController* Controller = GetOwner<AController>();
+	return Controller ? Controller->GetPawn().Get() : GetOwner();
 }
 
 bool UInteractorComponent::StartInteraction(FInstancedStruct Payload)
 {
-	if (!FocusTarget)
+	if (!FocusTarget || bInteracting)
 	{
 		return false;
 	}
 	bInteracting = FocusTarget->ReceiveInteractionStart(this, Payload);
 	if (bInteracting)
 	{
-		OnInteractionStarted.Broadcast(FocusTarget);
+		OnInteractionChangedEvent.Broadcast(this, FocusTarget, true);
 	}
 	return bInteracting;
 }
 
-void UInteractorComponent::StopInteraction()
+void UInteractorComponent::StopInteraction(const EInteractionEndReason Reason)
 {
-	if (FocusTarget == nullptr || bInteracting == false)
+	if (!bInteracting)
 	{
 		return;
 	}
+
+	// Cleared even when the target is already gone: StartInteraction refuses while this is set, so a flag left
+	// behind by a destroyed target would block every interaction after it.
 	bInteracting = false;
-	FocusTarget->ReceiveInteractionEnd(this);
-	OnInteractionEnded.Broadcast(FocusTarget);
+
+	if (IsValid(FocusTarget))
+	{
+		FocusTarget->ReceiveInteractionEnd(this, Reason);
+		OnInteractionChangedEvent.Broadcast(this, FocusTarget, false);
+	}
 }
 
 void UInteractorComponent::AddInteractionTarget(UInteractionTargetComponent* Target)
@@ -128,7 +158,7 @@ void UInteractorComponent::RemoveInteractionTarget(UInteractionTargetComponent* 
 
 	if (FocusTarget == Target)
 	{
-		ChangeFocus(nullptr);
+		ChangeFocus(nullptr, EInteractionEndReason::InteractorRemoved);
 	}
 
 	UnbindFromInteractionTargetActivation(Target);
@@ -201,16 +231,22 @@ bool UInteractorComponent::AreConditionsMet(const UInteractionTargetComponent* I
 	return Data->ConditionState.IsTrue(InteractionTarget, this);
 }
 
-UInteractorComponent* UInteractorComponent::FindInteractorComponent(const AActor* InInteractor)
+UInteractorComponent* UInteractorComponent::FindInteractorComponent(const AActor* Actor)
 {
-	if (!InInteractor)
+	if (Actor == nullptr)
 	{
 		return nullptr;
 	}
 
-	UInteractorComponent** InteractorComp = GlobalRegisteredInteractors.Find(InInteractor);
+	if (UInteractorComponent* Interactor = Actor->FindComponentByClass<UInteractorComponent>())
+	{
+		return Interactor;
+	}
 
-	return InteractorComp ? *InteractorComp : nullptr;
+	// A player's interactor may live on the controller rather than on the pawn that overlaps things.
+	const APawn* Pawn = Cast<APawn>(Actor);
+	const AController* Controller = Pawn ? Pawn->GetController() : nullptr;
+	return Controller ? Controller->FindComponentByClass<UInteractorComponent>() : nullptr;
 }
 
 void UInteractorComponent::UpdateFocusTarget()
@@ -220,20 +256,6 @@ void UInteractorComponent::UpdateFocusTarget()
 	if (FocusTarget != InteractionTarget)
 	{
 		ChangeFocus(InteractionTarget);
-	}
-}
-
-void UInteractorComponent::OnPossessedPawnChanged(APawn* OldPawn, APawn* NewPawn)
-{
-	// attempt to avoid controller's possess bug
-	if (OldPawn && GetWorld()->HasBegunPlay())
-	{
-		UnregisterActor(OldPawn);
-	}
-	
-	if (NewPawn)
-	{
-		RegisterActor(NewPawn);
 	}
 }
 
@@ -276,15 +298,16 @@ UInteractionTargetComponent* UInteractorComponent::GetInteractionTargetWithMaxPr
 	return OutInteractionTarget;
 }
 
-void UInteractorComponent::ChangeFocus(UInteractionTargetComponent* NewFocus)
+void UInteractorComponent::ChangeFocus(UInteractionTargetComponent* NewFocus, const EInteractionEndReason EndReason)
 {
+	// Losing focus is never what the interactor asked for, so whatever reacts to the end can tell it from a release,
+	// and from each other: the caller knows why focus is changing, and that is the reason passed on.
+	ensure(UE::Interaction::IsCanceled(EndReason));
+	StopInteraction(EndReason);
+
 	if (IsValid(FocusTarget))
 	{
-		StopInteraction();
-		if (IsValid(FocusTarget))
-		{
-			FocusTarget->ReceiveFocusLost(this);
-		}
+		FocusTarget->ReceiveFocusLost(this);
 	}
 	
 	if (!IsActive())
@@ -311,16 +334,6 @@ void UInteractorComponent::OnInteractionTargetDeactivated(UActorComponent* Compo
 	UInteractionTargetComponent* InteractionTarget = CastChecked<UInteractionTargetComponent>(Component);
 }
 
-void UInteractorComponent::RegisterActor(const AActor* Actor)
-{
-	GlobalRegisteredInteractors.Add(Actor, this);
-}
-
-void UInteractorComponent::UnregisterActor(const AActor* Actor)
-{
-	GlobalRegisteredInteractors.Remove(Actor);
-}
-
 void UInteractorComponent::BindToInteractionTargetActivation(UInteractionTargetComponent* InteractionTarget) const
 {
 	check(InteractionTarget);
@@ -337,17 +350,13 @@ void UInteractorComponent::UnbindFromInteractionTargetActivation(UInteractionTar
 
 APlayerController* UInteractorComponent::GetOwningPlayerController() const
 {
-	if (OwningPC)
+	if (APlayerController* PlayerController = GetOwner<APlayerController>())
 	{
-		return OwningPC;
+		return PlayerController;
 	}
 
-	if (APawn* OwningPawn = GetControlledPawn())
-	{
-		return Cast<APlayerController>(OwningPawn->GetController());
-	}
-	
-	return nullptr;
+	const APawn* Pawn = GetOwner<APawn>();
+	return Pawn ? Cast<APlayerController>(Pawn->GetController()) : nullptr;
 }
 
 FVector UInteractorComponent::GetOwningPawnViewPoint() const
@@ -359,11 +368,17 @@ FVector UInteractorComponent::GetOwningPawnViewPoint() const
 
 APawn* UInteractorComponent::GetControlledPawn() const
 {
-	return OwningPC ? OwningPC->GetPawn().Get() : GetOwner<APawn>();
+	const AController* Controller = GetOwner<AController>();
+	return Controller ? Controller->GetPawn().Get() : GetOwner<APawn>();
 }
 
 void UInteractorComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	if (AController* Controller = GetOwner<AController>())
+	{
+		Controller->OnPossessedPawnChanged.RemoveDynamic(this, &ThisClass::HandlePossessedPawnChanged);
+	}
+
 	for (FInteractorPerTargetData& Data : PerTargetData)
 	{
 		DeactivateConditions(Data);
@@ -380,6 +395,10 @@ void UInteractorComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void UInteractorComponent::Deactivate()
 {
+	// Before Super: it broadcasts OnComponentDeactivated, and a target hearing that from an interactor being destroyed
+	// removes the pair on the spot, which would end the interaction as InteractorRemoved instead.
+	StopInteraction(EInteractionEndReason::InteractorDeactivated);
+
 	Super::Deactivate();
-	ChangeFocus(nullptr);
+	ChangeFocus(nullptr, EInteractionEndReason::InteractorDeactivated);
 }

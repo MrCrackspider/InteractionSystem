@@ -1,79 +1,102 @@
-﻿// © Volga Studios. All rights reserved.
-
+// © Volga Studios. All rights reserved.
 
 #include "InteractorManagementModule/IMM_CreatePrimitive.h"
 
 #include "InteractionSystemDeveloperSettings.h"
 #include "InteractionTargetComponent.h"
+#include "Components/PrimitiveComponent.h"
+#include "GameFramework/Actor.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(IMM_CreatePrimitive)
 
 UIMM_CreatePrimitive::UIMM_CreatePrimitive()
 {
 	CollisionProfileName = UInteractionSystemDeveloperSettings::Get()->DefaultCollisionProfileName;
 }
 
-void UIMM_CreatePrimitive::BeginPlay(UInteractionTargetComponent* InOwner)
+void UIMM_CreatePrimitive::StartManaging(UInteractionTargetComponent& Target)
 {
-	SpawnedComponent = SpawnComponent(InOwner);
-	
-	check(SpawnedComponent.IsValid());
-
-	SpawnedComponent->OnComponentBeginOverlap.AddDynamic(this, &ThisClass::OnComponentBeginOverlap);
-	SpawnedComponent->OnComponentEndOverlap.AddDynamic(this, &ThisClass::OnComponentEndOverlap);
-
-	USceneComponent* AttachmentComp = GetAttachmentComponent(InOwner);
-
-	if (!AttachmentComp)
-	{
-		AttachmentComp = InOwner->GetOwner()->GetRootComponent();
-	}
-	
-	SpawnedComponent->AttachToComponent(AttachmentComp, FAttachmentTransformRules{EAttachmentRule::SnapToTarget, true});
-	
-	SpawnedComponent->SetCollisionProfileName(CollisionProfileName.Name);
-
-	SpawnedComponent->bHiddenInGame = bHiddenInGame;
-	
-	PreRegisterOverlapComponent(SpawnedComponent.Get(), AttachmentComp);
-
-	if (!ensure(SpawnedComponent.IsValid()))
+	AActor* Owner = Target.GetOwner();
+	if (!ensure(Owner != nullptr) || !ensure(GetBoundPrimitive() == nullptr))
 	{
 		return;
 	}
-	
-	SpawnedComponent->RegisterComponent();
-	
-	SpawnedComponent->UpdateOverlaps();
 
-	// Begin overlap won't trigger when we already have overlap during begin play, so we should add interactors manually
-	TArray<AActor*> OverlappingActors;
-	SpawnedComponent->GetOverlappingActors(OverlappingActors);
-	for (const AActor* Actor : OverlappingActors)
+	UPrimitiveComponent* Volume = CreateVolume(*Owner);
+	if (!ensureMsgf(Volume != nullptr, TEXT("'%s' created no volume."), *GetPathName()))
 	{
-		InOwner->AddInteractor(Actor);
+		return;
+	}
+
+	// Not welded: an overlap volume welded into a simulating body would become one of that body's shapes.
+	Volume->SetUsingAbsoluteScale(!bInheritScale);
+	Volume->SetupAttachment(GetAttachmentComponent(Target));
+	Volume->SetRelativeTransform(RelativeTransform);
+
+	Volume->SetCollisionProfileName(CollisionProfileName.Name);
+	Volume->SetGenerateOverlapEvents(true);
+	Volume->SetCanEverAffectNavigation(false);
+
+	// Never drawn in game: the gameplay debugger shows it when asked, and `show collision` always does.
+	Volume->SetHiddenInGame(true);
+
+	Volume->RegisterComponent();
+
+	// Whether registration computes the overlaps that exist already depends on where in the actor's startup it
+	// happens. Computed here before anything listens, and BindToPrimitive registers the result exactly once.
+	Volume->UpdateOverlaps();
+
+	BindToPrimitive(*Volume);
+}
+
+void UIMM_CreatePrimitive::StopManaging(UInteractionTargetComponent& Target)
+{
+	UPrimitiveComponent* Volume = GetBoundPrimitive();
+
+	UnbindFromPrimitive();
+
+	if (Volume != nullptr)
+	{
+		Volume->DestroyComponent();
 	}
 }
 
-void UIMM_CreatePrimitive::EndPlay(UInteractionTargetComponent* InOwner)
+USceneComponent* UIMM_CreatePrimitive::GetAttachmentComponent(UInteractionTargetComponent& Target) const
 {
-	if (SpawnedComponent.IsValid())
+	// An empty reference is not "no component" to the engine: FBaseComponentReference::ExtractComponent answers it
+	// with the actor's root. Unset has to be caught here, or the volume and its preview both land on the root.
+	const bool bIsAttachComponentSet = !AttachComponent.ComponentProperty.IsNone()
+		|| !AttachComponent.PathToComponent.IsEmpty()
+		|| AttachComponent.OverrideComponent.IsValid();
+
+	if (!bIsAttachComponentSet)
 	{
-		SpawnedComponent->DestroyComponent();
+		return &Target;
 	}
+
+	if (USceneComponent* Referenced = Cast<USceneComponent>(AttachComponent.GetComponent(Target.GetOwner())))
+	{
+		return Referenced;
+	}
+
+	return &Target;
 }
 
-USceneComponent* UIMM_CreatePrimitive::GetAttachmentComponent(UInteractionTargetComponent* InOwner) const
+const USceneComponent* UIMM_CreatePrimitive::GetAttachmentComponent(const UInteractionTargetComponent& Target) const
 {
-	return Cast<USceneComponent>(AttachComponent.GetComponent(InOwner->GetOwner()));
+	return GetAttachmentComponent(const_cast<UInteractionTargetComponent&>(Target));
 }
 
-void UIMM_CreatePrimitive::OnComponentBeginOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
-                                                   UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)
+FTransform UIMM_CreatePrimitive::GetVolumeTransform(const UInteractionTargetComponent& Target) const
 {
-	GetOuterUInteractionTargetComponent()->AddInteractor(OtherActor);
-}
+	// USceneComponent::CalcNewComponentToWorld_GeneralCase: compose with the parent, then take absolute parts
+	// straight from the relative transform.
+	FTransform Transform = RelativeTransform * GetAttachmentComponent(Target)->GetComponentTransform();
 
-void UIMM_CreatePrimitive::OnComponentEndOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
-	UPrimitiveComponent* OtherComp, int32 OtherBodyIndex)
-{
-	GetOuterUInteractionTargetComponent()->RemoveInteractor(OtherActor);
+	if (!bInheritScale)
+	{
+		Transform.CopyScale3D(RelativeTransform);
+	}
+
+	return Transform;
 }

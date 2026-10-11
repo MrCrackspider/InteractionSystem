@@ -47,8 +47,11 @@ public class InteractionSystem : ModuleRules
 		DynamicallyLoadedModuleNames.AddRange(
 			new string[]
 			{
-				
+
 			}
 			);
+
+		// The Interaction gameplay debugger category. Compiled out wherever the debugger is.
+		SetupGameplayDebuggerSupport(Target);
 	}
 }

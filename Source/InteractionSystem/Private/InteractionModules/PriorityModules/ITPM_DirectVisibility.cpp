@@ -60,6 +60,9 @@ float UITPM_CameraDirectVisibility::GetPriority(const UInteractionTargetComponen
 
 FVector UITPM_CameraDirectVisibility::GetStartLocation(const UInteractionTargetComponent* OwningInteractionTarget, const UInteractorComponent* InteractorComponent) const
 {
-	APlayerCameraManager* CM = InteractorComponent->GetOwningPlayerController() ? InteractorComponent->GetOwningPlayerController()->PlayerCameraManager : nullptr;
-	return CM->GetCameraLocation();
+	const APlayerController* PlayerController = InteractorComponent->GetOwningPlayerController();
+	const APlayerCameraManager* CameraManager = PlayerController != nullptr ? PlayerController->PlayerCameraManager.Get() : nullptr;
+
+	// GetPriority returns before tracing without a camera, but this is virtual and reachable on its own.
+	return CameraManager != nullptr ? CameraManager->GetCameraLocation() : Super::GetStartLocation(OwningInteractionTarget, InteractorComponent);
 }

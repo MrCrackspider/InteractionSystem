@@ -1,8 +1,8 @@
 #pragma once
 #include "InteractionDefinitionReference.h"
 #include "InteractionModuleTypes.h"
+#include "InteractionTypes.h"
 #include "Components/SceneComponent.h"
-#include "Math/NumericLimits.h"
 #include "Misc/Optional.h"
 #include "StructUtils/InstancedStruct.h"
 #include "WorldConditions/InteractionConditionState.h"
@@ -16,23 +16,10 @@ class UInteractionFunctionalModule;
 class UInteractionDefinition;
 class UInteractionWorldConditionSchema;
 
-// DEPRECATED
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FInteractionTargetEventSignature_DEPRECATED,
-											const UInteractorComponent*,
-											InteractorComponent);
-
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FInteractionTargetEventSignature,
 											const UInteractionTargetComponent*, InteractionTarget,
 											const UInteractorComponent*, Interactor,
 											bool, bInteractionStarted);
-
-/**
- * Fired when an interaction target's interaction history changes.
- *
- * Native rather than dynamic because its subscribers are world condition states, which are plain structs and so
- * cannot be the object half of a dynamic delegate.
- */
-DECLARE_MULTICAST_DELEGATE(FOnInteractionHistoryChanged);
 
 /**
  * Everything an interaction target keeps about one interactor registered with it.
@@ -104,6 +91,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "InteractionTarget", meta = (DefaultToSelf = "InActor"))
 	static UInteractionTargetComponent* FindInteractionTarget(const AActor* InActor);
 
+	/**
+	 * Replaces the interactor management module with a new one of Class, or with none.
+	 *
+	 * While playing, the old module stops, every interactor it registered is removed, and the new module starts and
+	 * registers whatever is in its range.
+	 */
 	UFUNCTION(BlueprintCallable, meta = (DeterminesOutputType = Class))
 	UInteractorManagementModule* SetInteractorManagementModuleClass(TSubclassOf<UInteractorManagementModule> Class);
 
@@ -113,6 +106,17 @@ public:
 	/** @return the parameter variation of Definition resolved at BeginPlay, or null outside play. */
 	UFUNCTION(BlueprintPure)
 	const UInteractionDefinition* GetDefinition() const { return CachedDefinition; }
+
+#if WITH_EDITOR
+	/**
+	 * @return the definition this target scores with, for editor previews: the one resolved at BeginPlay while
+	 *         playing, otherwise the parameter variation BeginPlay would resolve, resolved now.
+	 *
+	 * Resolving a variation may duplicate the asset. The result is cached weakly by the asset, so this is cheap while
+	 * it is being drawn every frame, but it is not something to call per candidate per tick.
+	 */
+	const UInteractionDefinition* ResolveDefinitionForVisualization() const;
+#endif // WITH_EDITOR
 
 	UFUNCTION(BlueprintCallable, meta=(DeprecatedFunction, DeprecationMessage = "Use SetActive()"))
 	void SetEnabled(bool bNewEnabled);
@@ -151,25 +155,6 @@ public:
 	bool IsInteractingWith(const UInteractorComponent* InteractorComponent) const;
 
 	/**
-	 * @return the world time at which the last interaction with this target ended, or a value far enough in the past
-	 *         that any cooldown measured from it has already elapsed when there has been no interaction yet.
-	 */
-	UFUNCTION(BlueprintPure)
-	double GetLastInteractionEndTime() const { return LastInteractionEndTime; }
-
-	/** @return how many interactions with this target have run to completion over its whole lifetime. */
-	UFUNCTION(BlueprintPure)
-	int32 GetCompletedInteractionCount() const { return CompletedInteractionCount; }
-
-	/**
-	 * @return the delegate fired whenever this target's interaction history changes.
-	 *
-	 * The invalidation signal for anything that caches a decision made from the history, a cooldown condition above
-	 * all: nothing else announces the change, because the history is written by this component itself.
-	 */
-	FOnInteractionHistoryChanged& OnInteractionHistoryChanged() { return OnInteractionHistoryChangedDelegate; }
-
-	/**
 	 * Scores this target for one interactor, which is what focus selection ranks candidates by.
 	 *
 	 * @return the score, or an unset value when the pairing is no candidate at all: this target is deactivated, the
@@ -178,32 +163,11 @@ public:
 	 */
 	TOptional<float> RequestPriority(const UInteractorComponent* InteractorComponent) const;
 
-	bool AddInteractor(const AActor* NewInteractor);
-	bool RemoveInteractor(const AActor* NewInteractor);
-
 	/**
-	 * Drops the pair with one interactor directly, without resolving it from its owning actor.
-	 *
-	 * Teardown needs this: by the time an interactor is being destroyed it may already be out of the global
-	 * interactor registry, and then resolving it by actor finds nothing and the pair would be left behind with its
-	 * conditions still subscribed.
+	 * @return the definition this target is scored with for one interactor: its own when it has one, otherwise the
+	 *         interactor's, so a bare target dropped on an actor is still focusable. Override, not merge.
 	 */
-	bool RemoveInteractorComponent(UInteractorComponent* InteractorComponent);
-	void ReceiveFocusReceived(UInteractorComponent* InteractorComponent);
-	void ReceiveFocusLost(UInteractorComponent* InteractorComponent);
-	bool ReceiveInteractionStart(UInteractorComponent* InteractorComponent, const FInstancedStruct& Payload);
-	void ReceiveInteractionEnd(UInteractorComponent* InteractorComponent);
-	
-	UPROPERTY(BlueprintAssignable, Category = "InteractionTarget")
-	FInteractionTargetEventSignature OnInteractionChangedEvent;
-
-	UPROPERTY(BlueprintAssignable, Category = "InteractionTarget", meta=(Deprecated))
-	FInteractionTargetEventSignature_DEPRECATED OnInteractionStartedEvent;
-
-	UPROPERTY(BlueprintAssignable, Category = "InteractionTarget", meta=(Deprecated))
-	FInteractionTargetEventSignature_DEPRECATED OnInteractionEndedEvent;
-
-protected:
+	const UInteractionDefinition* GetScoringDefinition(const UInteractorComponent* InteractorComponent) const;
 
 	/**
 	 * Evaluates the definition's conditions for one pair, against that pair's own condition state.
@@ -213,13 +177,46 @@ protected:
 	 */
 	bool AreConditionsMet(const UInteractorComponent* InteractorComponent) const;
 
+	bool AddInteractor(const AActor* NewInteractor);
+	bool RemoveInteractor(const AActor* NewInteractor);
+
+	/** Pairs with one interactor directly, without resolving it from an actor. @return whether a pair was formed. */
+	bool AddInteractorComponent(UInteractorComponent* InteractorComponent);
+
+	/**
+	 * Pairs with Interactor if the interactor management module says its actor is in range now.
+	 *
+	 * For an interactor whose actor changed under it: overlaps the new actor already had never produce an event, and
+	 * the interactor may not be resolvable from that actor yet — a client learns its pawn before the pawn learns its
+	 * controller — so this takes the component itself.
+	 */
+	void AddInteractorIfInRange(UInteractorComponent& Interactor);
+
+	/**
+	 * Drops the pair with one interactor directly, without resolving it from its owning actor.
+	 *
+	 * Teardown needs this: by the time an interactor is being destroyed, resolving it from an actor may no longer find
+	 * it — its pawn unpossessed, or the component already unregistered — and the pair would be left behind with its
+	 * conditions still subscribed.
+	 */
+	bool RemoveInteractorComponent(UInteractorComponent* InteractorComponent);
+	void ReceiveFocusReceived(UInteractorComponent* InteractorComponent);
+	void ReceiveFocusLost(UInteractorComponent* InteractorComponent);
+	bool ReceiveInteractionStart(UInteractorComponent* InteractorComponent, const FInstancedStruct& Payload);
+	void ReceiveInteractionEnd(UInteractorComponent* InteractorComponent, EInteractionEndReason Reason);
+	
+	UPROPERTY(BlueprintAssignable, Category = "InteractionTarget")
+	FInteractionTargetEventSignature OnInteractionChangedEvent;
+
+protected:
+
 	virtual void OnInteractorAdded(UInteractorComponent* InteractorComponent);
 	virtual void OnInteractorRemoved(UInteractorComponent* InteractorComponent);
 	virtual void OnFocusReceived(UInteractorComponent* InteractorComponent);
 	virtual void OnFocusLost(UInteractorComponent* InteractorComponent);
 	virtual void OnInteractionStarted(UInteractorComponent* InteractorComponent, const FInstancedStruct& Payload);
 	virtual void OnInteractionFailed(UInteractorComponent* InteractorComponent, const FInstancedStruct& Payload);
-	virtual void OnInteractionEnded(UInteractorComponent* InteractorComponent);
+	virtual void OnInteractionEnded(UInteractorComponent* InteractorComponent, EInteractionEndReason Reason);
 	virtual void OnInteractorAvailabilityChanged(const UInteractorComponent* InteractorComponent, bool bAvailable);
 
 	UFUNCTION()
@@ -228,6 +225,7 @@ protected:
 	UFUNCTION()
 	void OnInteractorDeactivated(UActorComponent* Component);
 
+	/** Decides which interactors are registered with this target. Without one, nothing ever is. */
 	UPROPERTY(Instanced, EditAnywhere)
 	TObjectPtr<UInteractorManagementModule> InteractorManagementModule;
 
@@ -236,13 +234,19 @@ protected:
 
 private:
 
-	/** Writes one completed interaction into the history above and announces it. */
-	void RecordCompletedInteraction();
+	/** Lets the interactor management module start registering interactors. Does nothing while it already is. */
+	void StartInteractorManagement();
+
+	/** Stops the interactor management module, then removes every interactor still registered. */
+	void StopInteractorManagement();
+
+	/** Removes every registered interactor, releasing each pair exactly as RemoveInteractorComponent does. */
+	void RemoveAllInteractors();
 
 	/**
 	 * Activates the pair's conditions, which is where a condition reads persistent context data and subscribes for
-	 * invalidation. Does nothing until the definition has been resolved, so BeginPlay calls it again for pairs that
-	 * registered before that.
+	 * invalidation. Does nothing until the definition has been resolved; interactor management only starts after
+	 * that, so in practice every pair is activated as it forms.
 	 */
 	void ActivateConditions(FInteractionPerInteractorData& Data);
 
@@ -286,6 +290,9 @@ private:
 
 	bool bModulesActivated = false;
 
+	/** Whether the interactor management module has been started and not stopped since. */
+	bool bManagingInteractors = false;
+
 	/** One entry per interactor registered with this target. @see FInteractionPerInteractorData. */
 	UPROPERTY(Transient)
 	TArray<FInteractionPerInteractorData> PerInteractorData;
@@ -294,28 +301,5 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<UInteractionDefinition> CachedDefinition;
 
-	/**
-	 * World time at which the last interaction with this target ended. Serialized, so a target that is destroyed and
-	 * respawned by the save system keeps its history.
-	 *
-	 * Written when an interaction ends, never when one starts: a cooldown measured from the start would turn this
-	 * target's own conditions false while it is still being used, focus selection would drop it on the next tick,
-	 * and the interaction that set the cooldown would be aborted by its own side effect.
-	 */
-	UPROPERTY(VisibleAnywhere, SaveGame, Category = "InteractionTarget", AdvancedDisplay)
-	double LastInteractionEndTime = TNumericLimits<double>::Lowest();
-
-	/** How many interactions with this target have completed. Counts completions, for the reason given above. */
-	UPROPERTY(VisibleAnywhere, SaveGame, Category = "InteractionTarget", AdvancedDisplay)
-	int32 CompletedInteractionCount = 0;
-
-	FOnInteractionHistoryChanged OnInteractionHistoryChangedDelegate;
-
 	friend class UInteractorComponent;
-};
-
-UCLASS()
-class UModularInteractionTarget : public UInteractionTargetComponent
-{
-	GENERATED_BODY()
 };

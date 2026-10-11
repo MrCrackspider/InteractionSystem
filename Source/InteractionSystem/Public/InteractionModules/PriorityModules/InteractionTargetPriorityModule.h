@@ -8,6 +8,7 @@
 
 class UInteractionTargetComponent;
 class UInteractorComponent;
+struct FInteractionVisualizationContext;
 
 UENUM(BlueprintType)
 enum class EInteractionModuleType : uint8
@@ -42,12 +43,59 @@ public:
 	 */
 	virtual UWorld* GetWorld() const override;
 
+	/** @return whether this module takes part in scoring. A disabled module is skipped as if its slot were empty. */
+	bool IsEnabled() const { return bEnabled; }
+
 	bool HasLogicalThreshold() const { return Type == EInteractionModuleType::Logical || Type == EInteractionModuleType::Mixed; }
 
 	/** @return this module's score for the pairing, interpreted according to Type. */
 	virtual float GetPriority(const UInteractionTargetComponent* OwningInteractionTarget, const UInteractorComponent* InteractorComponent) const { return 1.0f; }
 
+	/**
+	 * Called by the owning definition whenever this module's properties may have changed: after the definition loads,
+	 * after an edit, and after parameters are applied to a variation. Those are the only ways they change.
+	 *
+	 * The place to derive anything worth caching from them. Not PostInitProperties, which runs before a loaded
+	 * object's properties are read, and never GetPriority: scoring writes nothing.
+	 */
+	virtual void OnPropertiesChanged() {}
+
+#if WITH_EDITOR
+	/** Undo restores properties without going through the definition, so it reports the change itself. */
+	virtual void PostEditUndo() override;
+#endif // WITH_EDITOR
+
+#if WITH_EDITOR
+	/**
+	 * Draws where this module scores around a target placed in the editor.
+	 *
+	 * Only modules that score against something about the target's own placement have anything to draw; one that
+	 * scores the interactor's camera or facing alone does not.
+	 */
+	virtual void DrawVisualization(const FInteractionVisualizationContext& Context) const {}
+#endif // WITH_EDITOR
+
+	/** Off, the definition scores as though this module were not there: it neither adds a score nor vetoes. */
+	UPROPERTY(EditAnywhere)
+	bool bEnabled = true;
+
 	/** Module type determines how the owning interaction target will handle the returned priority. */
 	UPROPERTY(EditAnywhere)
 	EInteractionModuleType Type = EInteractionModuleType::Default;
+
+protected:
+
+	/**
+	 * Maps how far a direction is from a facing onto a score: one when they coincide, zero at the maximum angle, and
+	 * negative beyond it, so a Logical module vetoes exactly outside the angle.
+	 *
+	 * @param CosAngle    cosine of the angle between the two, the dot product of their unit vectors.
+	 * @param CosMaxAngle cosine of the angle at which the score reaches zero, cached in OnPropertiesChanged.
+	 */
+	static float ScoreAngle(double CosAngle, double CosMaxAngle);
+
+#if WITH_EDITOR
+	/** @return the colour to draw this module's boundary in, which says whether crossing it vetoes the target. */
+	FLinearColor GetVisualizationColor() const;
+#endif // WITH_EDITOR
 };

@@ -1,31 +1,40 @@
-﻿// © Volga Studios. All rights reserved.
-
+// © Volga Studios. All rights reserved.
 
 #include "InteractorManagementModule/IMM_CreateBox.h"
 
-#include "InteractionTargetComponent.h"
+#include "InteractionVisualization.h"
 #include "Components/BoxComponent.h"
+#include "GameFramework/Actor.h"
+#include "PrimitiveDrawingUtils.h"
 
-UBoxComponent* UIMM_CreateBox::GetBoxComponent() const
+#include UE_INLINE_GENERATED_CPP_BY_NAME(IMM_CreateBox)
+
+void UIMM_CreateBox::SetExtent(const FVector& NewExtent)
 {
-	return GetTypedComponentChecked<UBoxComponent>();
+	Extent = NewExtent.ComponentMax(FVector::ZeroVector);
+
+	if (UBoxComponent* Box = GetVolume<UBoxComponent>())
+	{
+		// Updating overlaps is what registers and removes the interactors the resize took in or left out.
+		Box->SetBoxExtent(Extent);
+	}
 }
 
-UPrimitiveComponent* UIMM_CreateBox::SpawnComponent(UInteractionTargetComponent* InOwner) const
+#if WITH_EDITOR
+void UIMM_CreateBox::DrawVisualization(const FInteractionVisualizationContext& Context) const
 {
-	return NewObject<UBoxComponent>(InOwner->GetOwner());
+	// The full transform, per-axis scale included, is what UBoxComponent applies to its extent.
+	DrawWireBox(&Context.PDI, GetVolumeTransform(Context.Target).ToMatrixWithScale(), FBox(-Extent, Extent),
+		UE::Interaction::Visualization::RegistrationColor, SDPG_World);
 }
+#endif // WITH_EDITOR
 
-void UIMM_CreateBox::PreRegisterOverlapComponent(const UPrimitiveComponent* Comp, const USceneComponent* AttachmentComponent)
+UPrimitiveComponent* UIMM_CreateBox::CreateVolume(AActor& Owner) const
 {
-	UBoxComponent* Box = GetBoxComponent();
-	
-	float ScalingFactor = AttachmentComponent->GetComponentScale().GetMin();
+	UBoxComponent* Box = NewObject<UBoxComponent>(&Owner,
+		MakeUniqueObjectName(&Owner, UBoxComponent::StaticClass(), TEXT("InteractionBox")), RF_Transient);
 
-	ScalingFactor = ScalingFactor <= 0.0 ? 1.0 : ScalingFactor;
-	
-	FVector Extend = bUseScaling ? BoxExtent : BoxExtent / ScalingFactor;
-	Extend *= SizeMultiplier;
-	
-	Box->SetBoxExtent(Extend, false);
+	Box->InitBoxExtent(Extent);
+
+	return Box;
 }

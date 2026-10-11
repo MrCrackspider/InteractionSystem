@@ -23,7 +23,7 @@
  * the Kismet compiler rejects writes to member variables. Keep new events const; a single non-const one silently
  * reopens the hole.
  */
-UCLASS(Blueprintable, DisplayName = "Blueprint Functional Module")
+UCLASS(Abstract, Blueprintable, DisplayName = "Blueprint Functional Module")
 class INTERACTIONSYSTEM_API UInteractionFunctionalModule_Blueprint : public UInteractionFunctionalModule
 {
 	GENERATED_BODY()
@@ -41,12 +41,13 @@ public:
 
 	virtual void OnActivated(UInteractionTargetComponent* InteractionTarget, FInstancedStruct& InstanceData) const override;
 	virtual void OnDeactivated(UInteractionTargetComponent* InteractionTarget, FInstancedStruct& InstanceData) const override;
+	virtual void OnCleanup(UInteractionTargetComponent* InteractionTarget, FInstancedStruct& InstanceData) const override;
 	virtual void OnFocusReceived(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, FInstancedStruct& InstanceData) const override;
 	virtual void OnFocusLost(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, FInstancedStruct& InstanceData) const override;
 	virtual void OnInteractorAvailabilityChanged(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, bool bAvailable, FInstancedStruct& InstanceData) const override;
 	virtual void OnInteractionStarted(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, const FInstancedStruct& Payload, FInstancedStruct& InstanceData) const override;
 	virtual void OnInteractionFailed(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, const FInstancedStruct& Payload, FInstancedStruct& InstanceData) const override;
-	virtual void OnInteractionEnded(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, FInstancedStruct& InstanceData) const override;
+	virtual void OnInteractionEnded(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, EInteractionEndReason Reason, FInstancedStruct& InstanceData) const override;
 	virtual void OnTick(UInteractionTargetComponent* InteractionTarget, float DeltaTime, FInstancedStruct& InstanceData) const override;
 	//~ End UInteractionFunctionalModule interface
 
@@ -72,6 +73,13 @@ protected:
 	UFUNCTION(BlueprintImplementableEvent, DisplayName = "On Deactivated", Category = "Interaction Module")
 	void ReceiveDeactivated(UInteractionTargetComponent* InteractionTarget, UPARAM(Ref) FInstancedStruct& InstanceData) const;
 
+	/**
+	 * Called once right before the owning target drops the instance data — when it ends play, or on a reset
+	 * activation. Release here what was meant to outlive deactivation, such as a widget still fading out.
+	 */
+	UFUNCTION(BlueprintImplementableEvent, DisplayName = "On Cleanup", Category = "Interaction Module")
+	void ReceiveCleanup(UInteractionTargetComponent* InteractionTarget, UPARAM(Ref) FInstancedStruct& InstanceData) const;
+
 	UFUNCTION(BlueprintImplementableEvent, DisplayName = "On Focus Received", Category = "Interaction Module")
 	void ReceiveFocusReceived(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, UPARAM(Ref) FInstancedStruct& InstanceData) const;
 
@@ -88,7 +96,7 @@ protected:
 	void ReceiveInteractionFailed(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, const FInstancedStruct& Payload, UPARAM(Ref) FInstancedStruct& InstanceData) const;
 
 	UFUNCTION(BlueprintImplementableEvent, DisplayName = "On Interaction Ended", Category = "Interaction Module")
-	void ReceiveInteractionEnded(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, UPARAM(Ref) FInstancedStruct& InstanceData) const;
+	void ReceiveInteractionEnded(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, EInteractionEndReason Reason, UPARAM(Ref) FInstancedStruct& InstanceData) const;
 
 	/** Only reached while the authored tick policy asks for it. */
 	UFUNCTION(BlueprintImplementableEvent, DisplayName = "On Tick", Category = "Interaction Module")
@@ -101,6 +109,7 @@ private:
 	{
 		Activated,
 		Deactivated,
+		Cleanup,
 		FocusReceived,
 		FocusLost,
 		InteractorAvailabilityChanged,

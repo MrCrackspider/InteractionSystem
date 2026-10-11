@@ -11,6 +11,11 @@ namespace UE::Interaction::Private
 {
 	/** Definitions whose scoring is running on this thread. @see FScopedDefinitionRecursion. */
 	static thread_local FDefinitionRecursionStack ScoringDefinitions;
+
+#if WITH_EDITOR
+	/** Definitions whose previews are being drawn on this thread. Its own stack, like every nesting point. */
+	static thread_local FDefinitionRecursionStack VisualizedDefinitions;
+#endif // WITH_EDITOR
 }
 
 UITPM_NestedDefinition::UITPM_NestedDefinition()
@@ -39,3 +44,21 @@ float UITPM_NestedDefinition::GetPriority(const UInteractionTargetComponent* Own
 	// An unset result is the nested definition rejecting the pairing outright, which is zero to a module.
 	return Definition->ComputePriority(InteractorComponent, OwningInteractionTarget).Get(0.0f);
 }
+
+#if WITH_EDITOR
+void UITPM_NestedDefinition::DrawVisualization(const FInteractionVisualizationContext& Context) const
+{
+	if (Definition == nullptr)
+	{
+		return;
+	}
+
+	// Silent on a cycle: this runs every frame while the target is selected, and scoring reports the same cycle
+	// once it runs.
+	const UE::Interaction::FScopedDefinitionRecursion ScopedDefinition(UE::Interaction::Private::VisualizedDefinitions, Definition);
+	if (!ScopedDefinition.IsCycle())
+	{
+		Definition->DrawVisualization(Context);
+	}
+}
+#endif // WITH_EDITOR

@@ -32,6 +32,10 @@ const FInteractionDefinitionDataHandle FInteractionDefinitionDataHandle::Paramet
 UInteractionDefinition::UInteractionDefinition()
 {
 	BindingCollection.SetBindingsOwner(this);
+
+	// A newly created asset never runs PostLoad, which is the only other place the schema is set, and without a schema
+	// the condition picker offers every condition type in the project. Loading overwrites this with the saved one.
+	Conditions.SetSchemaClass(UInteractionSystemDeveloperSettings::Get()->DefaultWorldConditionSchemaClass);
 }
 
 void UInteractionDefinition::PostInitProperties()
@@ -79,6 +83,10 @@ void UInteractionDefinition::PostLoad()
 			Descriptor->Struct = Parameters.GetPropertyBagStruct();
 		}
 	}
+
+	// The editor path above reaches this through ApplyParameters. The modules are instanced subobjects of this
+	// package, so their properties are serialized by the time any PostLoad of the package runs.
+	NotifyPriorityModulesChanged();
 #endif // WITH_EDITOR
 }
 
@@ -217,6 +225,10 @@ void UInteractionDefinition::PostEditChangeChainProperty(FPropertyChangedChainEv
 
 	UpdatePropertyBindings();
 	ApplyParameters();
+
+	// Variations are copies of the asset as it was, and editor previews resolve them too: without this a preview
+	// would keep showing the old values until the next save.
+	Variations.Reset();
 }
 
 void UInteractionDefinition::PreSave(FObjectPreSaveContext SaveContext)
@@ -316,31 +328,44 @@ void UInteractionDefinition::UpdatePropertyBindings()
 
 void UInteractionDefinition::ApplyParameters()
 {
-	if (!BindingCollection.ResolvePaths())
+	if (BindingCollection.ResolvePaths())
 	{
-		return;
+		for (const FPropertyBindingCopyInfoBatch& Batch : BindingCollection.GetCopyBatches())
+		{
+			BindingCollection.ForEachBinding(Batch.BindingsBegin, Batch.BindingsEnd,
+				[this, &Batch](const FPropertyBindingBinding& Binding, const int32 /*BindingIndex*/)
+				{
+					const FInteractionDefinitionPropertyBinding& InteractionBinding = static_cast<const FInteractionDefinitionPropertyBinding&>(Binding);
+
+					FPropertyBindingDataView SourceDataView;
+					FPropertyBindingDataView TargetDataView;
+					if (!GetDataView(InteractionBinding.SourceDataHandle, SourceDataView)
+						|| !GetDataView(InteractionBinding.TargetDataHandle, TargetDataView))
+					{
+						return;
+					}
+
+					for (const FPropertyBindingCopyInfo& Copy : BindingCollection.GetBatchCopies(Batch))
+					{
+						[[maybe_unused]] bool Temp = BindingCollection.CopyProperty(Copy, SourceDataView, TargetDataView);
+					}
+				});
+		}
 	}
 
-	for (const FPropertyBindingCopyInfoBatch& Batch : BindingCollection.GetCopyBatches())
+	// Even when nothing was copied: this runs after every edit and on every new variation, and a module's caches
+	// must follow whatever its properties hold now, bound or not.
+	NotifyPriorityModulesChanged();
+}
+
+void UInteractionDefinition::NotifyPriorityModulesChanged() const
+{
+	for (UInteractionTargetPriorityModule* Module : PriorityModules)
 	{
-		BindingCollection.ForEachBinding(Batch.BindingsBegin, Batch.BindingsEnd,
-			[this, &Batch](const FPropertyBindingBinding& Binding, const int32 /*BindingIndex*/)
-			{
-				const FInteractionDefinitionPropertyBinding& InteractionBinding = static_cast<const FInteractionDefinitionPropertyBinding&>(Binding);
-
-				FPropertyBindingDataView SourceDataView;
-				FPropertyBindingDataView TargetDataView;
-				if (!GetDataView(InteractionBinding.SourceDataHandle, SourceDataView)
-					|| !GetDataView(InteractionBinding.TargetDataHandle, TargetDataView))
-				{
-					return;
-				}
-
-				for (const FPropertyBindingCopyInfo& Copy : BindingCollection.GetBatchCopies(Batch))
-				{
-					[[maybe_unused]] bool Temp = BindingCollection.CopyProperty(Copy, SourceDataView, TargetDataView);
-				}
-			});
+		if (Module != nullptr)
+		{
+			Module->OnPropertiesChanged();
+		}
 	}
 }
 
@@ -425,7 +450,7 @@ TOptional<float> UInteractionDefinition::ComputePriority(const UInteractorCompon
 
 	for (const UInteractionTargetPriorityModule* Module : PriorityModules)
 	{
-		if (!Module)
+		if (Module == nullptr || !Module->IsEnabled())
 		{
 			continue;
 		}
@@ -447,6 +472,19 @@ TOptional<float> UInteractionDefinition::ComputePriority(const UInteractorCompon
 	// this pairing is worth focusing, so it is not a candidate.
 	return ResultPriority > 0.0 ? TOptional<float>(ResultPriority) : TOptional<float>();
 }
+
+#if WITH_EDITOR
+void UInteractionDefinition::DrawVisualization(const FInteractionVisualizationContext& Context) const
+{
+	for (const UInteractionTargetPriorityModule* Module : PriorityModules)
+	{
+		if (Module != nullptr && Module->IsEnabled())
+		{
+			Module->DrawVisualization(Context);
+		}
+	}
+}
+#endif // WITH_EDITOR
 
 const TArray<int32>& UInteractionDefinition::GetTickingModuleIndices() const
 {
@@ -473,7 +511,7 @@ void UInteractionDefinition::ConditionallyBuildModuleTickCache() const
 	for (int32 Index = 0; Index < FunctionalModules.Num(); ++Index)
 	{
 		const UInteractionFunctionalModule* Module = FunctionalModules[Index];
-		if (Module == nullptr)
+		if (Module == nullptr || !Module->IsEnabled())
 		{
 			continue;
 		}

@@ -1,3 +1,4 @@
+// © Volga Studios. All rights reserved.
 
 #pragma once
 
@@ -7,14 +8,21 @@
 #include "ITPM_InteractorProximity.generated.h"
 
 /**
- * Computes priority based on interactor's proximity to interaction target
- */ 
+ * Scores the target by how close the interactor's view point is to it: one at the target, falling to zero at
+ * MaxDistance.
+ */
 UCLASS(DisplayName = "Interactor Proximity")
 class INTERACTIONSYSTEM_API UITPM_InteractorProximity : public UInteractionTargetPriorityModule
 {
 	GENERATED_BODY()
 
+public:
+
 	virtual float GetPriority(const UInteractionTargetComponent* OwningInteractionTarget, const UInteractorComponent* InteractorComponent) const override;
+
+#if WITH_EDITOR
+	virtual void DrawVisualization(const FInteractionVisualizationContext& Context) const override;
+#endif // WITH_EDITOR
 
 protected:
 
@@ -24,6 +32,5 @@ protected:
 
 	/** Should distance vector Z component be ignored */
 	UPROPERTY(EditAnywhere)
-	bool IgnoreDeltaZ = false;
-
+	bool bIgnoreDeltaZ = false;
 };

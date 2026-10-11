@@ -1,36 +1,42 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
+// © Volga Studios. All rights reserved.
 
 #include "InteractorManagementModule/IMM_CreateSphere.h"
-#include "InteractionTargetComponent.h"
-#include "InteractorComponent.h"
+
+#include "InteractionVisualization.h"
 #include "Components/SphereComponent.h"
+#include "GameFramework/Actor.h"
+#include "PrimitiveDrawingUtils.h"
 
-USphereComponent* UIMM_CreateSphere::GetSphereComponent() const
-{
-	return GetTypedComponentChecked<USphereComponent>();
-}
+#include UE_INLINE_GENERATED_CPP_BY_NAME(IMM_CreateSphere)
 
-void UIMM_CreateSphere::SetRadius(float NewRadius)
+void UIMM_CreateSphere::SetRadius(const float NewRadius)
 {
-	if (USphereComponent* Sphere = GetSphereComponent())
+	Radius = FMath::Max(NewRadius, 0.0f);
+
+	if (USphereComponent* Sphere = GetVolume<USphereComponent>())
 	{
-		Sphere->SetSphereRadius(NewRadius);
+		// Updating overlaps is what registers and removes the interactors the resize took in or left out.
+		Sphere->SetSphereRadius(Radius);
 	}
 }
 
-void UIMM_CreateSphere::PreRegisterOverlapComponent(const UPrimitiveComponent* Comp, const USceneComponent* AttachmentComponent)
+#if WITH_EDITOR
+void UIMM_CreateSphere::DrawVisualization(const FInteractionVisualizationContext& Context) const
 {
-	USphereComponent* Sphere = GetSphereComponent();
-	
-	float ScalingFactor = AttachmentComponent->GetComponentScale().GetMin();
+	// Scaled the way USphereComponent::GetScaledSphereRadius scales it.
+	const FTransform Transform = GetVolumeTransform(Context.Target);
 
-	ScalingFactor = ScalingFactor <= 0.0 ? 1.0 : ScalingFactor;
-	
-	Sphere->SetSphereRadius(bUseRadiusScaling ? Radius : Radius / ScalingFactor, false);
+	DrawWireSphereAutoSides(&Context.PDI, Transform.GetLocation(), UE::Interaction::Visualization::RegistrationColor,
+		Radius * Transform.GetMinimumAxisScale(), SDPG_World);
 }
+#endif // WITH_EDITOR
 
-UPrimitiveComponent* UIMM_CreateSphere::SpawnComponent(UInteractionTargetComponent* InOwner) const
+UPrimitiveComponent* UIMM_CreateSphere::CreateVolume(AActor& Owner) const
 {
-	return NewObject<USphereComponent>(InOwner->GetOwner());
+	USphereComponent* Sphere = NewObject<USphereComponent>(&Owner,
+		MakeUniqueObjectName(&Owner, USphereComponent::StaticClass(), TEXT("InteractionSphere")), RF_Transient);
+
+	Sphere->InitSphereRadius(Radius);
+
+	return Sphere;
 }

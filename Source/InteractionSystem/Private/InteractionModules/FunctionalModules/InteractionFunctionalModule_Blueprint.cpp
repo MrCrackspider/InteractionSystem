@@ -16,6 +16,7 @@ void UInteractionFunctionalModule_Blueprint::ConditionallyBuildImplementedEvents
 	{
 		GET_FUNCTION_NAME_CHECKED(UInteractionFunctionalModule_Blueprint, ReceiveActivated),
 		GET_FUNCTION_NAME_CHECKED(UInteractionFunctionalModule_Blueprint, ReceiveDeactivated),
+		GET_FUNCTION_NAME_CHECKED(UInteractionFunctionalModule_Blueprint, ReceiveCleanup),
 		GET_FUNCTION_NAME_CHECKED(UInteractionFunctionalModule_Blueprint, ReceiveFocusReceived),
 		GET_FUNCTION_NAME_CHECKED(UInteractionFunctionalModule_Blueprint, ReceiveFocusLost),
 		GET_FUNCTION_NAME_CHECKED(UInteractionFunctionalModule_Blueprint, ReceiveInteractorAvailabilityChanged),
@@ -69,6 +70,14 @@ void UInteractionFunctionalModule_Blueprint::OnDeactivated(UInteractionTargetCom
 	}
 }
 
+void UInteractionFunctionalModule_Blueprint::OnCleanup(UInteractionTargetComponent* InteractionTarget, FInstancedStruct& InstanceData) const
+{
+	if (IsImplemented(EBlueprintEvent::Cleanup))
+	{
+		ReceiveCleanup(InteractionTarget, InstanceData);
+	}
+}
+
 void UInteractionFunctionalModule_Blueprint::OnFocusReceived(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, FInstancedStruct& InstanceData) const
 {
 	if (IsImplemented(EBlueprintEvent::FocusReceived))
@@ -109,11 +118,11 @@ void UInteractionFunctionalModule_Blueprint::OnInteractionFailed(UInteractionTar
 	}
 }
 
-void UInteractionFunctionalModule_Blueprint::OnInteractionEnded(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, FInstancedStruct& InstanceData) const
+void UInteractionFunctionalModule_Blueprint::OnInteractionEnded(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, const EInteractionEndReason Reason, FInstancedStruct& InstanceData) const
 {
 	if (IsImplemented(EBlueprintEvent::InteractionEnded))
 	{
-		ReceiveInteractionEnded(InteractionTarget, Interactor, InstanceData);
+		ReceiveInteractionEnded(InteractionTarget, Interactor, Reason, InstanceData);
 	}
 }
 

@@ -19,6 +19,7 @@ class UInteractionTargetComponent;
 class UInteractionWorldConditionSchema;
 class UInteractionDefinition;
 class UWorld;
+struct FInteractionVisualizationContext;
 struct FPropertyBindingDataView;
 
 namespace UE::Interaction::Delegates
@@ -86,6 +87,11 @@ public:
 	 */
 	TOptional<float> ComputePriority(const UInteractorComponent* Interactor, const UInteractionTargetComponent* InteractionTarget) const;
 
+#if WITH_EDITOR
+	/** Draws every priority module's preview around one target placed with this definition. */
+	INTERACTIONSYSTEM_API void DrawVisualization(const FInteractionVisualizationContext& Context) const;
+#endif // WITH_EDITOR
+
 	/**
 	 * @return indices into FunctionalModules of the modules that ask to be ticked, in authored order.
 	 *
@@ -124,7 +130,12 @@ public:
 
 private:
 
+	/** Copies the parameters into the properties bound to them, then tells every priority module. */
 	void ApplyParameters();
+
+	/** @see UInteractionTargetPriorityModule::OnPropertiesChanged. */
+	void NotifyPriorityModulesChanged() const;
+
 	bool GetDataView(const FInteractionDefinitionDataHandle DataHandle, FPropertyBindingDataView& OutDataView);
 
 	/** Fills the tick cache below on first use. Modules only change in the editor, which invalidates it. */

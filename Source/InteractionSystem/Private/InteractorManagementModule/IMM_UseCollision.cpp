@@ -1,50 +1,49 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
+// © Volga Studios. All rights reserved.
 
 #include "InteractorManagementModule/IMM_UseCollision.h"
+
 #include "InteractionTargetComponent.h"
-#include "InteractorComponent.h"
+#include "InteractionVisualization.h"
 #include "Components/ShapeComponent.h"
+#include "GameFramework/Actor.h"
+#include "PrimitiveDrawingUtils.h"
 
-void UIMM_UseCollision::BeginPlay(UInteractionTargetComponent* Owner)
+#include UE_INLINE_GENERATED_CPP_BY_NAME(IMM_UseCollision)
+
+void UIMM_UseCollision::StartManaging(UInteractionTargetComponent& Target)
 {
-	ShapeComponentCached = Cast<UShapeComponent>(Component.GetComponent(Owner->GetOwner()));
+	UShapeComponent* Shape = ResolveShape(Target);
 
-	if (!ShapeComponentCached.IsValid())
+	if (!ensureMsgf(Shape != nullptr, TEXT("'%s' references no shape component on '%s'; no interactor will ever be registered."),
+		*GetPathName(), *GetPathNameSafe(Target.GetOwner())))
 	{
 		return;
 	}
 
-	ShapeComponentCached->OnComponentBeginOverlap.AddDynamic(this, &UIMM_UseCollision::OnComponentBeginOverlap);
-	ShapeComponentCached->OnComponentEndOverlap.AddDynamic(this, &UIMM_UseCollision::OnComponentEndOverlap);
+	BindToPrimitive(*Shape);
+}
 
-	TArray<AActor*> OverlappingActors;
-		
-	ShapeComponentCached->GetOverlappingActors(OverlappingActors);
+void UIMM_UseCollision::StopManaging(UInteractionTargetComponent& Target)
+{
+	UnbindFromPrimitive();
+}
 
-	for (const AActor* Actor : OverlappingActors)
+#if WITH_EDITOR
+void UIMM_UseCollision::DrawVisualization(const FInteractionVisualizationContext& Context) const
+{
+	const UShapeComponent* ReferencedShape = ResolveShape(Context.Target);
+	if (ReferencedShape == nullptr)
 	{
-		Owner->AddInteractor(Actor);
+		return;
 	}
-}
 
-void UIMM_UseCollision::EndPlay(UInteractionTargetComponent* Owner)
-{
-	if (ShapeComponentCached.IsValid())
-	{
-		ShapeComponentCached->OnComponentBeginOverlap.RemoveDynamic(this, &UIMM_UseCollision::OnComponentBeginOverlap);
-		ShapeComponentCached->OnComponentEndOverlap.RemoveDynamic(this, &UIMM_UseCollision::OnComponentEndOverlap);
-	}
+	constexpr double DashSize = 8.0;
+	DrawDashedLine(&Context.PDI, Context.Target.GetComponentLocation(), ReferencedShape->GetComponentLocation(),
+		UE::Interaction::Visualization::RegistrationColor, DashSize, SDPG_World);
 }
+#endif // WITH_EDITOR
 
-void UIMM_UseCollision::OnComponentBeginOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
-                                                UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)
+UShapeComponent* UIMM_UseCollision::ResolveShape(const UInteractionTargetComponent& Target) const
 {
-	GetOuterUInteractionTargetComponent()->AddInteractor(OtherActor);
-}
-
-void UIMM_UseCollision::OnComponentEndOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
-	UPrimitiveComponent* OtherComp, int32 OtherBodyIndex)
-{
-	GetOuterUInteractionTargetComponent()->RemoveInteractor(OtherActor);
+	return Cast<UShapeComponent>(Component.GetComponent(Target.GetOwner()));
 }

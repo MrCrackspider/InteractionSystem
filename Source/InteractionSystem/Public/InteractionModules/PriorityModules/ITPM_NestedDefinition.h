@@ -27,6 +27,11 @@ public:
 
 	virtual float GetPriority(const UInteractionTargetComponent* OwningInteractionTarget, const UInteractorComponent* InteractorComponent) const override;
 
+#if WITH_EDITOR
+	/** Draws the nested definition's previews, as if its modules were authored here. */
+	virtual void DrawVisualization(const FInteractionVisualizationContext& Context) const override;
+#endif // WITH_EDITOR
+
 	/**
 	 * Definition whose priority modules do the scoring. A plain asset reference, not an FInteractionDefinitionReference:
 	 * resolving a parameter variation needs a world and may duplicate the asset, neither of which belongs in

@@ -17,7 +17,7 @@
  * A Blueprint that does not implement Get Priority scores like the native base class rather than scoring zero,
  * which would otherwise reject the target outright in Logical and Mixed mode.
  */
-UCLASS(Blueprintable, DisplayName = "Blueprint Priority Module")
+UCLASS(Abstract, Blueprintable, DisplayName = "Blueprint Priority Module")
 class INTERACTIONSYSTEM_API UInteractionTargetPriorityModule_Blueprint : public UInteractionTargetPriorityModule
 {
 	GENERATED_BODY()

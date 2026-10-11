@@ -1,5 +1,6 @@
 #pragma once
 #include "InteractionDefinitionReference.h"
+#include "InteractionTypes.h"
 #include "Components/ActorComponent.h"
 #include "StructUtils/InstancedStruct.h"
 #include "WorldConditions/InteractionConditionState.h"
@@ -53,15 +54,7 @@ struct TStructOpsTypeTraits<FInteractorPerTargetData> : public TStructOpsTypeTra
 	};
 };
 
-// DEPRECATED
-DECLARE_DYNAMIC_MULTICAST_SPARSE_DELEGATE_OneParam(FOnInteractionStartedSignature_DEPRECATED, UInteractorComponent, OnInteractionStarted,
-													const UInteractionTargetComponent*, InteractionTarget);
-
-// DEPRECATED
-DECLARE_DYNAMIC_MULTICAST_SPARSE_DELEGATE_OneParam(FOnInteractionEndedSignature_DEPRECATED, UInteractorComponent, OnInteractionEnded,
-                                                    const UInteractionTargetComponent*, InteractionTarget);
-
-DECLARE_DYNAMIC_MULTICAST_SPARSE_DELEGATE_ThreeParams(FOnInteractionEndedSignature, UInteractorComponent, OnInteractionEnded,
+DECLARE_DYNAMIC_MULTICAST_SPARSE_DELEGATE_ThreeParams(FOnInteractionChangedSignature, UInteractorComponent, OnInteractionChangedEvent,
                                                     const UInteractorComponent*, Interactor, 
                                                     const UInteractionTargetComponent*, InteractionTarget,
                                                     bool, bInteractionStarted);
@@ -74,10 +67,6 @@ class INTERACTIONSYSTEM_API UInteractorComponent : public UActorComponent
 public:
 
     UInteractorComponent();
-    
-    virtual void OnRegister() override;
-
-    virtual void OnUnregister() override;
 
     virtual void BeginPlay() override;
 
@@ -87,6 +76,7 @@ public:
 
     virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
     
+    /** @return the actor that stands for this interactor in the world: the controlled pawn when owned by a controller. */
     AActor* GetRegisterActor() const;
 
     UFUNCTION(BlueprintPure)
@@ -116,37 +106,46 @@ public:
     UFUNCTION(BlueprintPure)
     APawn* GetControlledPawn() const;
 
+    /**
+     * Starts an interaction with the focus target.
+     *
+     * @return whether one started. False without a focus target, when the target refuses, or while an interaction is
+     *         already running: a second start would reach the target's modules twice for one interaction.
+     */
     UFUNCTION(BlueprintCallable, Category = "Interactor Component")
     bool StartInteraction(FInstancedStruct Payload);
 
+    /** Ends the running interaction, if any. Reason reaches every functional module of the target. */
     UFUNCTION(BlueprintCallable, Category = "Interactor Component")
-    void StopInteraction();
+    void StopInteraction(EInteractionEndReason Reason = EInteractionEndReason::Stopped);
+
+    UFUNCTION(BlueprintPure, Category = "Interactor Component")
+    bool IsInteracting() const { return bInteracting; }
 
     void AddInteractionTarget(UInteractionTargetComponent* Target);
 
     void RemoveInteractionTarget(UInteractionTargetComponent* Target);
 
-    static UInteractorComponent* FindInteractorComponent(const AActor* InInteractor);
+    /**
+     * @return the interactor acting for Actor: one on the actor itself, otherwise, for a pawn, one on its controller.
+     *
+     * Resolved on every call rather than kept in a registry, so it follows possession with nothing to keep up to date.
+     * It is a scan of one or two actors' components, a fraction of the overlap event that usually asks.
+     */
+    static UInteractorComponent* FindInteractorComponent(const AActor* Actor);
 
-    UPROPERTY(BlueprintAssignable, Category = "Interaction", meta = (Deprecated))
-    FOnInteractionStartedSignature_DEPRECATED OnInteractionStarted;
-
-    UPROPERTY(BlueprintAssignable, Category = "Interaction", meta = (Deprecated))
-    FOnInteractionEndedSignature_DEPRECATED OnInteractionEnded;
-    
+    /** Fired when this interactor starts an interaction with its focus target, and when that interaction ends. */
     UPROPERTY(BlueprintAssignable, Category = "Interaction")
-    FOnInteractionEndedSignature OnInteractionChangedEvent;
+    FOnInteractionChangedSignature OnInteractionChangedEvent;
 
 protected:
-
-    UFUNCTION()
-    void OnPossessedPawnChanged(APawn* OldPawn, APawn* NewPawn);
 
     UInteractionTargetComponent* GetInteractionTargetWithMaxPriority() const;
 
     void UpdateFocusTarget();
 
-    void ChangeFocus(UInteractionTargetComponent* NewFocus);
+    /** @param EndReason  what ends a running interaction with the old focus, if there is one. */
+    void ChangeFocus(UInteractionTargetComponent* NewFocus, EInteractionEndReason EndReason = EInteractionEndReason::FocusLost);
 
     virtual void OnInteractionTargetAdded(UInteractionTargetComponent* InteractionTarget) {}
     virtual void OnInteractionTargetRemoved(UInteractionTargetComponent* InteractionTarget) {}
@@ -168,9 +167,17 @@ protected:
     void OnInteractionTargetDeactivated(UActorComponent* Component);
     
 private:
-    
-    void RegisterActor(const AActor* Actor);
-    void UnregisterActor(const AActor* Actor);
+
+    /**
+     * A controller-owned interactor stands for whatever pawn it possesses, so every pair formed for the old pawn is
+     * dropped and the targets the new pawn already overlaps are asked whether it is in their range.
+     */
+    UFUNCTION()
+    void HandlePossessedPawnChanged(APawn* OldPawn, APawn* NewPawn);
+
+    /** Drops every pair, from both sides. */
+    void RemoveAllInteractionTargets();
+
     void BindToInteractionTargetActivation(UInteractionTargetComponent* InteractionTarget) const;
     void UnbindFromInteractionTargetActivation(UInteractionTargetComponent* InteractionTarget) const;
 
@@ -197,7 +204,4 @@ private:
     UPROPERTY(Transient)
     UInteractionTargetComponent* FocusTarget = nullptr;
 
-    static TMap<const AActor*, UInteractorComponent*> GlobalRegisteredInteractors;
-
-    TObjectPtr<APlayerController> OwningPC = nullptr;
 };
