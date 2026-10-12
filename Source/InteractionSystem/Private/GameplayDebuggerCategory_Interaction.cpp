@@ -10,6 +10,7 @@
 #include "InteractionVisualization.h"
 #include "InteractorComponent.h"
 #include "Components/PrimitiveComponent.h"
+#include "DrawDebugHelpers.h"
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
@@ -74,7 +75,7 @@ namespace UE::Interaction::Debugger::Private
 		// give one.
 		if (!Interactor.AreConditionsMet(&Target))
 		{
-			Report.Rejection = TEXT("interactor's conditions");
+			Report.Rejection = TEXT("Interactor's conditions");
 			return Report;
 		}
 
@@ -82,20 +83,20 @@ namespace UE::Interaction::Debugger::Private
 
 		if (!Target.IsActive())
 		{
-			Report.Rejection = TEXT("target inactive");
+			Report.Rejection = TEXT("Target inactive");
 			return Report;
 		}
 
 		if (!Target.AreConditionsMet(&Interactor))
 		{
-			Report.Rejection = TEXT("target's conditions");
+			Report.Rejection = TEXT("Target's conditions");
 			return Report;
 		}
 
 		const UInteractionDefinition* Definition = Target.GetScoringDefinition(&Interactor);
 		if (Definition == nullptr)
 		{
-			Report.Rejection = TEXT("no definition to score with");
+			Report.Rejection = TEXT("No definition");
 			return Report;
 		}
 
@@ -110,11 +111,11 @@ namespace UE::Interaction::Debugger::Private
 			const float Score = Module->GetPriority(&Target, &Interactor);
 			const bool bVetoes = Score <= 0.0f && Module->HasLogicalThreshold();
 
-			Scores.Add(FString::Printf(TEXT("%s %.2f%s"), *GetModuleName(*Module), Score, bVetoes ? TEXT(" (veto)") : TEXT("")));
+			Scores.Add(FString::Printf(TEXT("%s %.2f%s"), *GetModuleName(*Module), Score, bVetoes ? TEXT(" (Veto)") : TEXT("")));
 
 			if (bVetoes && Report.Rejection.IsEmpty())
 			{
-				Report.Rejection = FString::Printf(TEXT("vetoed by %s"), *GetModuleName(*Module));
+				Report.Rejection = FString::Printf(TEXT("Vetoed by %s"), *GetModuleName(*Module));
 			}
 		}
 
@@ -122,7 +123,7 @@ namespace UE::Interaction::Debugger::Private
 
 		if (!Report.Priority.IsSet() && Report.Rejection.IsEmpty())
 		{
-			Report.Rejection = TEXT("nothing scored above zero");
+			Report.Rejection = TEXT("Nothing scored above zero");
 		}
 
 		return Report;
@@ -143,23 +144,28 @@ TSharedRef<FGameplayDebuggerCategory> FGameplayDebuggerCategory_Interaction::Mak
 	return MakeShared<FGameplayDebuggerCategory_Interaction>();
 }
 
-void FGameplayDebuggerCategory_Interaction::CollectData(APlayerController* OwnerPC, AActor* DebugActor)
+const UInteractorComponent* FGameplayDebuggerCategory_Interaction::FindSubjectInteractor(const APlayerController* OwnerPC, const AActor* DebugActor)
 {
-	// Interactors are registered under the actor they act as — the pawn for one living on a controller — so this
-	// finds either kind.
+	// Resolves a pawn to the interactor on its controller too, so this finds either kind.
 	const UInteractorComponent* Interactor = UInteractorComponent::FindInteractorComponent(DebugActor);
 	if (Interactor == nullptr && OwnerPC != nullptr)
 	{
 		Interactor = UInteractorComponent::FindInteractorComponent(OwnerPC->GetPawn());
 	}
 
+	return Interactor;
+}
+
+void FGameplayDebuggerCategory_Interaction::CollectData(APlayerController* OwnerPC, AActor* DebugActor)
+{
+	const UInteractorComponent* Interactor = FindSubjectInteractor(OwnerPC, DebugActor);
 	if (Interactor != nullptr)
 	{
 		DescribeInteractor(*Interactor);
 	}
 	else
 	{
-		AddTextLine(TEXT("{grey}No interactor on the debug actor or the local pawn."));
+		AddTextLine(TEXT("{silver}No interactor on the debug actor or the local pawn."));
 	}
 
 	if (const UInteractionTargetComponent* Target = UInteractionTargetComponent::FindInteractionTarget(DebugActor))
@@ -176,12 +182,12 @@ void FGameplayDebuggerCategory_Interaction::DescribeInteractor(const UInteractor
 
 	const UInteractionTargetComponent* Focus = Interactor.GetFocusTarget();
 
-	AddTextLine(FString::Printf(TEXT("{white}Interactor {yellow}%s{white}%s  definition {yellow}%s"),
+	AddTextLine(FString::Printf(TEXT("{white}Interactor {yellow}%s{white}%s  Definition {yellow}%s"),
 		*GetDisplayName(Interactor.GetRegisterActor()),
-		Interactor.IsActive() ? TEXT("") : TEXT(" {red}(inactive){white}"),
+		Interactor.IsActive() ? TEXT("") : TEXT(" {red}(Inactive){white}"),
 		*GetNameSafe(Interactor.GetDefinition())));
 
-	AddTextLine(FString::Printf(TEXT("{white}Focus {green}%s"), Focus != nullptr ? *GetTargetName(*Focus) : TEXT("none")));
+	AddTextLine(FString::Printf(TEXT("{white}Focus {green}%s"), Focus != nullptr ? *GetTargetName(*Focus) : TEXT("None")));
 
 	const TArray<UInteractionTargetComponent*> Targets = Interactor.GetInteractionTargets();
 	AddTextLine(FString::Printf(TEXT("{white}Registered targets: %d"), Targets.Num()));
@@ -203,29 +209,73 @@ void FGameplayDebuggerCategory_Interaction::DescribeCandidate(const UInteractorC
 	const bool bFocused = Interactor.GetFocusTarget() == &Target;
 
 	FString Line;
-	FColor Color;
 
 	if (Report.Priority.IsSet())
 	{
-		Color = bFocused ? FocusColor : CandidateColor;
 		Line = FString::Printf(TEXT("  {%s}%s{white}  %.2f"), bFocused ? TEXT("green") : TEXT("yellow"), *GetTargetName(Target), Report.Priority.GetValue());
 	}
 	else
 	{
-		Color = RejectedColor;
-		Line = FString::Printf(TEXT("  {red}%s{white}  not a candidate: %s"), *GetTargetName(Target), *Report.Rejection);
+		Line = FString::Printf(TEXT("  {red}%s{white}  Not a candidate: %s"), *GetTargetName(Target), *Report.Rejection);
 	}
 
 	if (!Report.ModuleScores.IsEmpty())
 	{
-		Line += FString::Printf(TEXT("  {grey}[%s]"), *Report.ModuleScores);
+		// Silver, not grey: the colour list's Grey is dark enough to vanish against most of a level.
+		Line += FString::Printf(TEXT("  {silver}[%s]"), *Report.ModuleScores);
 	}
 
 	AddTextLine(Line);
+}
 
-	const FString Label = Report.Priority.IsSet() ? FString::Printf(TEXT("%.2f"), Report.Priority.GetValue()) : Report.Rejection;
-	AddShape(FGameplayDebuggerShape::MakeSegment(Interactor.GetOwningPawnViewPoint(), Target.GetComponentLocation(),
-		bFocused ? 3.0f : 1.0f, Color, Label));
+void FGameplayDebuggerCategory_Interaction::DrawData(APlayerController* OwnerPC, FGameplayDebuggerCanvasContext& CanvasContext)
+{
+	const UInteractorComponent* Interactor = FindSubjectInteractor(OwnerPC, FindLocalDebugActor());
+	if (Interactor == nullptr)
+	{
+		return;
+	}
+
+	for (const UInteractionTargetComponent* Target : Interactor->GetInteractionTargets())
+	{
+		if (IsValid(Target))
+		{
+			DrawCandidate(*Interactor, *Target, CanvasContext);
+		}
+	}
+}
+
+void FGameplayDebuggerCategory_Interaction::DrawCandidate(const UInteractorComponent& Interactor, const UInteractionTargetComponent& Target, FGameplayDebuggerCanvasContext& CanvasContext)
+{
+	using namespace UE::Interaction::Debugger::Private;
+
+	const FCandidateReport Report = Evaluate(Interactor, Target);
+	const bool bFocused = Interactor.GetFocusTarget() == &Target;
+	const FColor Color = !Report.Priority.IsSet() ? RejectedColor : bFocused ? FocusColor : CandidateColor;
+
+	const FVector TargetLocation = Target.GetComponentLocation();
+
+	// Zero thickness is a one-pixel line. The focus gets a little more, enough to pick out without hiding the label.
+	DrawDebugLine(CanvasContext.GetWorld(), Interactor.GetOwningPawnViewPoint(), TargetLocation, Color,
+		/*bPersistentLines*/ false, /*LifeTime*/ -1.0f, SDPG_World, bFocused ? 1.0f : 0.0f);
+
+	if (!CanvasContext.IsLocationVisible(TargetLocation))
+	{
+		return;
+	}
+
+	// Above the target rather than on the line: the line's own colour would swallow text drawn across it, and at the
+	// target's end the label says which target it is about. The score is white so it reads against anything.
+	const FString Label = Report.Priority.IsSet()
+		? FString::Printf(TEXT("{%s}%s{white}%.2f"), bFocused ? TEXT("green") : TEXT("yellow"), bFocused ? TEXT("FOCUS  ") : TEXT(""), Report.Priority.GetValue())
+		: FString::Printf(TEXT("{red}%s"), *Report.Rejection);
+
+	float LabelWidth = 0.0f;
+	float LabelHeight = 0.0f;
+	CanvasContext.MeasureString(Label, LabelWidth, LabelHeight);
+
+	const FVector2D ScreenLocation = CanvasContext.ProjectLocation(TargetLocation);
+	CanvasContext.PrintAt(ScreenLocation.X - LabelWidth * 0.5f, ScreenLocation.Y - LabelHeight * 2.5f, Label);
 }
 
 void FGameplayDebuggerCategory_Interaction::DescribeTarget(const UInteractionTargetComponent& Target)
@@ -234,14 +284,14 @@ void FGameplayDebuggerCategory_Interaction::DescribeTarget(const UInteractionTar
 
 	const UInteractorManagementModule* ManagementModule = Target.GetInteractorManagementModule();
 
-	AddTextLine(FString::Printf(TEXT("{white}Target {yellow}%s  %s{white}  definition {yellow}%s{white}  management {yellow}%s"),
+	AddTextLine(FString::Printf(TEXT("{white}Target {yellow}%s  %s{white}  Definition {yellow}%s{white}  Management {yellow}%s"),
 		*GetTargetName(Target),
-		Target.IsActive() ? TEXT("{green}active") : TEXT("{red}inactive"),
+		Target.IsActive() ? TEXT("{green}Active") : TEXT("{red}Inactive"),
 		*GetNameSafe(Target.GetDefinition()),
-		ManagementModule != nullptr ? *GetModuleName(*ManagementModule) : TEXT("none (nothing ever registers)")));
+		ManagementModule != nullptr ? *GetModuleName(*ManagementModule) : TEXT("None (nothing ever registers)")));
 
 	const TArray<UInteractorComponent*> Interactors = Target.GetInteractors();
-	AddTextLine(FString::Printf(TEXT("{white}Registered interactors: %d, interacting %d"), Interactors.Num(), Target.GetInteractingInteractorCount()));
+	AddTextLine(FString::Printf(TEXT("{white}Registered interactors: %d, Interacting: %d"), Interactors.Num(), Target.GetInteractingInteractorCount()));
 
 	for (const UInteractorComponent* Interactor : Interactors)
 	{
@@ -252,10 +302,10 @@ void FGameplayDebuggerCategory_Interaction::DescribeTarget(const UInteractionTar
 
 		const bool bConditionsMet = Target.AreConditionsMet(Interactor);
 
-		AddTextLine(FString::Printf(TEXT("  {yellow}%s{white}  conditions %s%s"),
+		AddTextLine(FString::Printf(TEXT("  {yellow}%s{white}  Conditions %s%s"),
 			*GetDisplayName(Interactor->GetRegisterActor()),
-			bConditionsMet ? TEXT("{green}pass") : TEXT("{red}fail"),
-			Target.IsInteractingWith(Interactor) ? TEXT("  {green}interacting") : TEXT("")));
+			bConditionsMet ? TEXT("{green}Pass") : TEXT("{red}Fail"),
+			Target.IsInteractingWith(Interactor) ? TEXT("  {green}Interacting") : TEXT("")));
 	}
 }
 
