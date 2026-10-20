@@ -82,8 +82,10 @@ public:
 	/**
 	 * Runs this definition's priority modules over one pairing.
 	 *
-	 * @return the strongest score any module gave, or an unset value when the pairing is not focusable at all: a
-	 *         Logical module vetoed it, or nothing scored above zero. The threshold lives here and nowhere else.
+	 * @return the strongest score any scoring module gave, or an unset value when the pairing is not focusable at all:
+	 *         a Logical module vetoed it, or nothing scored above zero. Logical modules veto without scoring, so a
+	 *         definition of Logical modules alone scores every pairing that passes them at one. The threshold lives
+	 *         here and nowhere else.
 	 */
 	TOptional<float> ComputePriority(const UInteractorComponent* Interactor, const UInteractionTargetComponent* InteractionTarget) const;
 
@@ -93,15 +95,15 @@ public:
 #endif // WITH_EDITOR
 
 	/**
-	 * @return indices into FunctionalModules of the modules that ask to be ticked, in authored order.
+	 * @return indices into FunctionalModules of the modules that run on Side and ask to be ticked, in authored order.
 	 *
-	 * Computed once and shared by every interaction target using this definition, so a target's tick does no
-	 * per-module filtering and never reaches a module that does not tick.
+	 * Computed once and shared by every component using this definition, so a component's tick does no per-module
+	 * filtering and never reaches a module that does not tick.
 	 */
-	const TArray<int32>& GetTickingModuleIndices() const;
+	const TArray<int32>& GetTickingModuleIndices(EInteractionSide Side) const;
 
-	/** @return the strongest tick policy across FunctionalModules, which is what the owning target has to honour. */
-	EInteractionModuleTickPolicy GetModuleTickPolicy() const;
+	/** @return the strongest tick policy across the modules that run on Side, which the owning component honours. */
+	EInteractionModuleTickPolicy GetModuleTickPolicy(EInteractionSide Side) const;
 
 	UPROPERTY(EditDefaultsOnly, meta = (NoBinding))
 	FInstancedPropertyBag Parameters;
@@ -110,8 +112,9 @@ public:
 	TArray<TObjectPtr<UInteractionTargetPriorityModule>> PriorityModules;
 
 	/**
-	 * Behaviour shared by every interaction target using this definition. Modules are const at runtime; each target
-	 * keeps its own instance data for them. @see UInteractionFunctionalModule.
+	 * Behaviour shared by every component using this definition, target or interactor. Each component runs the modules
+	 * that support its side and skips the rest. Modules are const at runtime; each component keeps its own instance
+	 * data for them. @see UInteractionFunctionalModule, FInteractionModuleRuntime.
 	 */
 	UPROPERTY(EditAnywhere, Instanced)
 	TArray<TObjectPtr<UInteractionFunctionalModule>> FunctionalModules;
@@ -167,10 +170,11 @@ private:
 	
 	TArray<FInteractionDefinitionAssetVariation> Variations;
 
-	/** @see GetTickingModuleIndices. Derived from FunctionalModules, so not serialized. */
-	mutable TArray<int32> TickingModuleIndices;
+	/** @see GetTickingModuleIndices. One per EInteractionSide. Derived from FunctionalModules, so not serialized. */
+	mutable TArray<int32> TickingModuleIndices[2];
 
-	mutable EInteractionModuleTickPolicy ModuleTickPolicy = EInteractionModuleTickPolicy::Never;
+	/** @see GetModuleTickPolicy. One per EInteractionSide. */
+	mutable EInteractionModuleTickPolicy ModuleTickPolicy[2] = { EInteractionModuleTickPolicy::Never, EInteractionModuleTickPolicy::Never };
 
 	mutable bool bModuleTickCacheBuilt = false;
 };

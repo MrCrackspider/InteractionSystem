@@ -3,6 +3,7 @@
 #include "InteractionDefinition.h"
 #include "InteractionSystem.h"
 #include "InteractionTargetComponent.h"
+#include "InteractionModules/FunctionalModules/InteractionFunctionalModule.h"
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
@@ -20,6 +21,9 @@ void UInteractorComponent::BeginPlay()
 {
 	CachedDefinition = Definition.GetAssetVariation(GetWorld());
 
+	// Before anything can dispatch an event, as on the target.
+	ModuleRuntime.Initialize(CachedDefinition, EInteractionSide::Interactor);
+
 	// A target that registered before the definition was resolved has no condition state yet.
 	for (FInteractorPerTargetData& Data : PerTargetData)
 	{
@@ -32,6 +36,14 @@ void UInteractorComponent::BeginPlay()
 	}
 
 	Super::BeginPlay();
+
+	UpdateModuleActivation();
+
+	// Pairs formed before play began reached no module, since none was activated yet.
+	if (IsActive())
+	{
+		NotifyPairedTargetsAvailability(true);
+	}
 }
 
 void UInteractorComponent::HandlePossessedPawnChanged(APawn* OldPawn, APawn* NewPawn)
@@ -75,7 +87,13 @@ void UInteractorComponent::TickComponent(float DeltaTime, ELevelTick TickType, F
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
 	UpdateFocusTarget();
-	
+
+	// The interactor ticks anyway, for focus, so its modules ride on that tick instead of toggling one of their own.
+	if (ModuleRuntime.WantsTick(!PerTargetData.IsEmpty()))
+	{
+		ModuleRuntime.Tick(MakeModuleContext(), DeltaTime);
+	}
+
 	UE_VLOG_SPHERE(this, LogInteractionSystem, Display, FocusTarget ? FocusTarget->GetComponentLocation() : FVector::ZeroVector, 
 		FocusTarget ? 35.0 : 0.0, FColor::Red, TEXT_EMPTY);
 }
@@ -92,11 +110,29 @@ bool UInteractorComponent::StartInteraction(FInstancedStruct Payload)
 	{
 		return false;
 	}
-	bInteracting = FocusTarget->ReceiveInteractionStart(this, Payload);
+
+	UInteractionTargetComponent* InteractionTarget = FocusTarget;
+	bInteracting = InteractionTarget->ReceiveInteractionStart(this, Payload);
+
+	// After the target, which is the one that decided.
+	const FInteractionModuleContext Context = MakeModuleContext(InteractionTarget);
 	if (bInteracting)
 	{
-		OnInteractionChangedEvent.Broadcast(this, FocusTarget, true);
+		ModuleRuntime.Dispatch([&Context, &Payload](const UInteractionFunctionalModule& Module, FInstancedStruct& InstanceData)
+		{
+			Module.OnInteractionStarted(Context, Payload, InstanceData);
+		});
+
+		OnInteractionChangedEvent.Broadcast(this, InteractionTarget, true);
 	}
+	else
+	{
+		ModuleRuntime.Dispatch([&Context, &Payload](const UInteractionFunctionalModule& Module, FInstancedStruct& InstanceData)
+		{
+			Module.OnInteractionFailed(Context, Payload, InstanceData);
+		});
+	}
+
 	return bInteracting;
 }
 
@@ -111,10 +147,24 @@ void UInteractorComponent::StopInteraction(const EInteractionEndReason Reason)
 	// behind by a destroyed target would block every interaction after it.
 	bInteracting = false;
 
-	if (IsValid(FocusTarget))
+	UInteractionTargetComponent* InteractionTarget = IsValid(FocusTarget) ? FocusTarget : nullptr;
+
+	if (InteractionTarget != nullptr)
 	{
-		FocusTarget->ReceiveInteractionEnd(this, Reason);
-		OnInteractionChangedEvent.Broadcast(this, FocusTarget, false);
+		InteractionTarget->ReceiveInteractionEnd(this, Reason);
+	}
+
+	// Reached with or without a target: the modules heard the start, so they hear the end, or they would be left
+	// holding state for an interaction that is over.
+	const FInteractionModuleContext Context = MakeModuleContext(InteractionTarget);
+	ModuleRuntime.Dispatch([&Context, Reason](const UInteractionFunctionalModule& Module, FInstancedStruct& InstanceData)
+	{
+		Module.OnInteractionEnded(Context, Reason, InstanceData);
+	});
+
+	if (InteractionTarget != nullptr)
+	{
+		OnInteractionChangedEvent.Broadcast(this, InteractionTarget, false);
 	}
 }
 
@@ -133,6 +183,11 @@ void UInteractorComponent::AddInteractionTarget(UInteractionTargetComponent* Tar
 	BindToInteractionTargetActivation(Target);
 
 	OnInteractionTargetAdded(Target);
+
+	if (IsActive() && Target->IsActive())
+	{
+		OnTargetAvailabilityChanged(Target, true);
+	}
 }
 
 void UInteractorComponent::RemoveInteractionTarget(UInteractionTargetComponent* Target)
@@ -164,6 +219,11 @@ void UInteractorComponent::RemoveInteractionTarget(UInteractionTargetComponent* 
 	UnbindFromInteractionTargetActivation(Target);
 
 	OnInteractionTargetRemoved(Target);
+
+	if (IsActive() && Target->IsActive())
+	{
+		OnTargetAvailabilityChanged(Target, false);
+	}
 }
 
 TArray<UInteractionTargetComponent*> UInteractorComponent::GetInteractionTargets() const
@@ -273,12 +333,8 @@ UInteractionTargetComponent* UInteractorComponent::GetInteractionTargetWithMaxPr
 			continue;
 		}
 
-		// A pairing has to satisfy both sides: this interactor's own requirements, and the target's.
-		if (!AreConditionsMet(InteractionTarget))
-		{
-			continue;
-		}
-
+		// Neither side's conditions are checked here. They gate starting an interaction, which the target checks for
+		// both sides in CanInteract; focus is the scoring definition's to decide, @see UITPM_ConditionsMet.
 		const TOptional<float> Priority = InteractionTarget->RequestPriority(this);
 
 		if (const AActor* Actor = GetRegisterActor())
@@ -307,7 +363,14 @@ void UInteractorComponent::ChangeFocus(UInteractionTargetComponent* NewFocus, co
 
 	if (IsValid(FocusTarget))
 	{
-		FocusTarget->ReceiveFocusLost(this);
+		UInteractionTargetComponent* OldFocus = FocusTarget;
+		OldFocus->ReceiveFocusLost(this);
+
+		const FInteractionModuleContext Context = MakeModuleContext(OldFocus);
+		ModuleRuntime.Dispatch([&Context](const UInteractionFunctionalModule& Module, FInstancedStruct& InstanceData)
+		{
+			Module.OnFocusLost(Context, InstanceData);
+		});
 	}
 	
 	if (!IsActive())
@@ -321,27 +384,67 @@ void UInteractorComponent::ChangeFocus(UInteractionTargetComponent* NewFocus, co
 	if (NewFocus)
 	{
 		NewFocus->ReceiveFocusReceived(this);
+
+		const FInteractionModuleContext Context = MakeModuleContext(NewFocus);
+		ModuleRuntime.Dispatch([&Context](const UInteractionFunctionalModule& Module, FInstancedStruct& InstanceData)
+		{
+			Module.OnFocusReceived(Context, InstanceData);
+		});
 	}
 }
 
 void UInteractorComponent::OnInteractionTargetActivated(UActorComponent* Component, bool bReset)
 {
-	UInteractionTargetComponent* InteractionTarget = CastChecked<UInteractionTargetComponent>(Component);
+	if (IsActive())
+	{
+		OnTargetAvailabilityChanged(CastChecked<UInteractionTargetComponent>(Component), true);
+	}
 }
 
 void UInteractorComponent::OnInteractionTargetDeactivated(UActorComponent* Component)
 {
-	UInteractionTargetComponent* InteractionTarget = CastChecked<UInteractionTargetComponent>(Component);
+	OnTargetAvailabilityChanged(CastChecked<UInteractionTargetComponent>(Component), false);
 }
 
-void UInteractorComponent::BindToInteractionTargetActivation(UInteractionTargetComponent* InteractionTarget) const
+void UInteractorComponent::OnTargetAvailabilityChanged(UInteractionTargetComponent* InteractionTarget, const bool bAvailable)
+{
+	const FInteractionModuleContext Context = MakeModuleContext(InteractionTarget);
+	ModuleRuntime.Dispatch([&Context, bAvailable](const UInteractionFunctionalModule& Module, FInstancedStruct& InstanceData)
+	{
+		Module.OnAvailabilityChanged(Context, bAvailable, InstanceData);
+	});
+}
+
+void UInteractorComponent::NotifyPairedTargetsAvailability(const bool bAvailable)
+{
+	// A copy: what a module does on hearing this may well add or remove pairs.
+	for (UInteractionTargetComponent* InteractionTarget : GetInteractionTargets())
+	{
+		if (IsValid(InteractionTarget) && (!bAvailable || InteractionTarget->IsActive()))
+		{
+			OnTargetAvailabilityChanged(InteractionTarget, bAvailable);
+		}
+	}
+}
+
+FInteractionModuleContext UInteractorComponent::MakeModuleContext(UInteractionTargetComponent* InteractionTarget)
+{
+	return FInteractionModuleContext::MakeForInteractor(*this, InteractionTarget);
+}
+
+void UInteractorComponent::UpdateModuleActivation()
+{
+	ModuleRuntime.SetActivated(HasBegunPlay() && IsActive() && CachedDefinition != nullptr, MakeModuleContext());
+}
+
+void UInteractorComponent::BindToInteractionTargetActivation(UInteractionTargetComponent* InteractionTarget)
 {
 	check(InteractionTarget);
 	InteractionTarget->OnComponentActivated.AddDynamic(this, &ThisClass::OnInteractionTargetActivated);
 	InteractionTarget->OnComponentDeactivated.AddDynamic(this, &ThisClass::OnInteractionTargetDeactivated);
 }
 
-void UInteractorComponent::UnbindFromInteractionTargetActivation(UInteractionTargetComponent* InteractionTarget) const
+void UInteractorComponent::UnbindFromInteractionTargetActivation(UInteractionTargetComponent* InteractionTarget)
 {
 	check(InteractionTarget);
 	InteractionTarget->OnComponentActivated.RemoveDynamic(this, &ThisClass::OnInteractionTargetActivated);
@@ -379,6 +482,13 @@ void UInteractorComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		Controller->OnPossessedPawnChanged.RemoveDynamic(this, &ThisClass::HandlePossessedPawnChanged);
 	}
 
+	// The same order as the target's: deactivating tells the modules every pair went away and then deactivates them,
+	// both of which need live instance data and live pairs. The modules' state is dropped only after that, and the
+	// pairs last.
+	Deactivate();
+
+	ModuleRuntime.Shutdown(MakeModuleContext());
+
 	for (FInteractorPerTargetData& Data : PerTargetData)
 	{
 		DeactivateConditions(Data);
@@ -389,8 +499,30 @@ void UInteractorComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		}
 	}
 	PerTargetData.Empty();
-	Deactivate();
+
 	Super::EndPlay(EndPlayReason);
+}
+
+void UInteractorComponent::Activate(bool bReset)
+{
+	const bool bWasActive = IsActive();
+
+	Super::Activate(bReset);
+
+	if (bReset && HasBegunPlay())
+	{
+		// A reset activation starts the modules over from the values authored on the definition.
+		ModuleRuntime.Shutdown(MakeModuleContext());
+		ModuleRuntime.Initialize(CachedDefinition, EInteractionSide::Interactor);
+	}
+
+	UpdateModuleActivation();
+
+	// Only on an actual change, so an Activate on an active interactor does not announce every target a second time.
+	if (IsActive() && (!bWasActive || bReset))
+	{
+		NotifyPairedTargetsAvailability(true);
+	}
 }
 
 void UInteractorComponent::Deactivate()
@@ -399,6 +531,12 @@ void UInteractorComponent::Deactivate()
 	// removes the pair on the spot, which would end the interaction as InteractorRemoved instead.
 	StopInteraction(EInteractionEndReason::InteractorDeactivated);
 
+	// While the modules are still activated, so they can react before they are torn down.
+	NotifyPairedTargetsAvailability(false);
+
 	Super::Deactivate();
 	ChangeFocus(nullptr, EInteractionEndReason::InteractorDeactivated);
+
+	// Last: the focus just lost above still reached the modules.
+	UpdateModuleActivation();
 }

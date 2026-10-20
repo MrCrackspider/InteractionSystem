@@ -33,13 +33,13 @@ void FInteractionSystemEditorModule::StartupModule()
 	}
 	else
 	{
-		FCoreDelegates::OnPostEngineInit.AddRaw(this, &FInteractionSystemEditorModule::RegisterComponentVisualizers);
+		FCoreDelegates::GetOnPostEngineInit().AddRaw(this, &FInteractionSystemEditorModule::RegisterComponentVisualizers);
 	}
 }
 
 void FInteractionSystemEditorModule::ShutdownModule()
 {
-	FCoreDelegates::OnPostEngineInit.RemoveAll(this);
+	FCoreDelegates::GetOnPostEngineInit().RemoveAll(this);
 	UnregisterComponentVisualizers();
 
 	if (FPropertyEditorModule* PropertyModule = FModuleManager::GetModulePtr<FPropertyEditorModule>("PropertyEditor"))

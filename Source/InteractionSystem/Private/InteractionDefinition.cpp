@@ -447,6 +447,8 @@ TOptional<float> UInteractionDefinition::ComputePriority(const UInteractorCompon
 	}
 
 	float ResultPriority = 0.0;
+	bool bHasScoringModule = false;
+	bool bHasPassedVeto = false;
 
 	for (const UInteractionTargetPriorityModule* Module : PriorityModules)
 	{
@@ -465,7 +467,23 @@ TOptional<float> UInteractionDefinition::ComputePriority(const UInteractorCompon
 			return {};
 		}
 
+		// A Logical module only vetoes. Joining its pass value to the maximum would lift every pairing that passes it to
+		// that value, and flatten whatever ranking the scoring modules below it produce.
+		if (!Module->ContributesToScore())
+		{
+			bHasPassedVeto = true;
+			continue;
+		}
+
+		bHasScoringModule = true;
 		ResultPriority = FMath::Max(Priority, ResultPriority);
+	}
+
+	// A definition made of vetoes alone has nothing to rank by: every pairing that passes them is a candidate, and they
+	// all tie.
+	if (!bHasScoringModule)
+	{
+		return bHasPassedVeto ? TOptional<float>(1.0f) : TOptional<float>();
 	}
 
 	// Nothing scored above zero, which is not the same as zero being the best score on offer: no module has said
@@ -486,16 +504,16 @@ void UInteractionDefinition::DrawVisualization(const FInteractionVisualizationCo
 }
 #endif // WITH_EDITOR
 
-const TArray<int32>& UInteractionDefinition::GetTickingModuleIndices() const
+const TArray<int32>& UInteractionDefinition::GetTickingModuleIndices(const EInteractionSide Side) const
 {
 	ConditionallyBuildModuleTickCache();
-	return TickingModuleIndices;
+	return TickingModuleIndices[static_cast<int32>(Side)];
 }
 
-EInteractionModuleTickPolicy UInteractionDefinition::GetModuleTickPolicy() const
+EInteractionModuleTickPolicy UInteractionDefinition::GetModuleTickPolicy(const EInteractionSide Side) const
 {
 	ConditionallyBuildModuleTickCache();
-	return ModuleTickPolicy;
+	return ModuleTickPolicy[static_cast<int32>(Side)];
 }
 
 void UInteractionDefinition::ConditionallyBuildModuleTickCache() const
@@ -505,29 +523,33 @@ void UInteractionDefinition::ConditionallyBuildModuleTickCache() const
 		return;
 	}
 
-	TickingModuleIndices.Reset();
-	ModuleTickPolicy = EInteractionModuleTickPolicy::Never;
-
-	for (int32 Index = 0; Index < FunctionalModules.Num(); ++Index)
+	for (const EInteractionSide Side : { EInteractionSide::Target, EInteractionSide::Interactor })
 	{
-		const UInteractionFunctionalModule* Module = FunctionalModules[Index];
-		if (Module == nullptr || !Module->IsEnabled())
-		{
-			continue;
-		}
+		const int32 SideIndex = static_cast<int32>(Side);
+		TickingModuleIndices[SideIndex].Reset();
+		ModuleTickPolicy[SideIndex] = EInteractionModuleTickPolicy::Never;
 
-		const EInteractionModuleTickPolicy Policy = Module->GetTickPolicy();
-		if (Policy == EInteractionModuleTickPolicy::Never)
+		for (int32 Index = 0; Index < FunctionalModules.Num(); ++Index)
 		{
-			continue;
-		}
+			const UInteractionFunctionalModule* Module = FunctionalModules[Index];
+			if (Module == nullptr || !Module->IsEnabled() || !Module->SupportsSide(Side))
+			{
+				continue;
+			}
 
-		TickingModuleIndices.Add(Index);
+			const EInteractionModuleTickPolicy Policy = Module->GetTickPolicy();
+			if (Policy == EInteractionModuleTickPolicy::Never)
+			{
+				continue;
+			}
 
-		// The enum is ordered by strength, so the target's policy is the strongest any module asks for.
-		if (Policy > ModuleTickPolicy)
-		{
-			ModuleTickPolicy = Policy;
+			TickingModuleIndices[SideIndex].Add(Index);
+
+			// The enum is ordered by strength, so the component's policy is the strongest any module asks for.
+			if (Policy > ModuleTickPolicy[SideIndex])
+			{
+				ModuleTickPolicy[SideIndex] = Policy;
+			}
 		}
 	}
 

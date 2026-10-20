@@ -64,19 +64,26 @@ namespace UE::Interaction::Debugger::Private
 
 		/** Each priority module's own score, in authored order. */
 		FString ModuleScores;
+
+		/**
+		 * Whose conditions would refuse an interaction started now. Empty when neither side's would. Independent of
+		 * focus: conditions only keep a target out of focus through a Conditions Met module, which shows in the scores.
+		 */
+		FString StartRefusal;
 	};
 
 	FCandidateReport Evaluate(const UInteractorComponent& Interactor, const UInteractionTargetComponent& Target)
 	{
 		FCandidateReport Report;
 
-		// Same order as UInteractorComponent::GetInteractionTargetWithMaxPriority: the interactor's requirements are
-		// checked before the target is asked at all, so a pairing failing them has no score even if the target would
-		// give one.
-		if (!Interactor.AreConditionsMet(&Target))
+		// The same pair of checks UInteractionTargetComponent::CanInteract makes, target first.
+		if (!Target.AreConditionsMet(&Interactor))
 		{
-			Report.Rejection = TEXT("Interactor's conditions");
-			return Report;
+			Report.StartRefusal = TEXT("Target's conditions");
+		}
+		else if (!Interactor.AreConditionsMet(&Target))
+		{
+			Report.StartRefusal = TEXT("Interactor's conditions");
 		}
 
 		Report.Priority = Target.RequestPriority(&Interactor);
@@ -84,12 +91,6 @@ namespace UE::Interaction::Debugger::Private
 		if (!Target.IsActive())
 		{
 			Report.Rejection = TEXT("Target inactive");
-			return Report;
-		}
-
-		if (!Target.AreConditionsMet(&Interactor))
-		{
-			Report.Rejection = TEXT("Target's conditions");
 			return Report;
 		}
 
@@ -225,6 +226,11 @@ void FGameplayDebuggerCategory_Interaction::DescribeCandidate(const UInteractorC
 		Line += FString::Printf(TEXT("  {silver}[%s]"), *Report.ModuleScores);
 	}
 
+	if (!Report.StartRefusal.IsEmpty())
+	{
+		Line += FString::Printf(TEXT("  {orange}Cannot start: %s"), *Report.StartRefusal);
+	}
+
 	AddTextLine(Line);
 }
 
@@ -266,9 +272,15 @@ void FGameplayDebuggerCategory_Interaction::DrawCandidate(const UInteractorCompo
 
 	// Above the target rather than on the line: the line's own colour would swallow text drawn across it, and at the
 	// target's end the label says which target it is about. The score is white so it reads against anything.
-	const FString Label = Report.Priority.IsSet()
+	FString Label = Report.Priority.IsSet()
 		? FString::Printf(TEXT("{%s}%s{white}%.2f"), bFocused ? TEXT("green") : TEXT("yellow"), bFocused ? TEXT("FOCUS  ") : TEXT(""), Report.Priority.GetValue())
 		: FString::Printf(TEXT("{red}%s"), *Report.Rejection);
+
+	// Only on a candidate: a target that cannot be focused cannot be started either, and the rejection already says why.
+	if (Report.Priority.IsSet() && !Report.StartRefusal.IsEmpty())
+	{
+		Label += TEXT("  {orange}BLOCKED");
+	}
 
 	float LabelWidth = 0.0f;
 	float LabelHeight = 0.0f;

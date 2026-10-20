@@ -19,7 +19,7 @@ void UInteractionFunctionalModule_Blueprint::ConditionallyBuildImplementedEvents
 		GET_FUNCTION_NAME_CHECKED(UInteractionFunctionalModule_Blueprint, ReceiveCleanup),
 		GET_FUNCTION_NAME_CHECKED(UInteractionFunctionalModule_Blueprint, ReceiveFocusReceived),
 		GET_FUNCTION_NAME_CHECKED(UInteractionFunctionalModule_Blueprint, ReceiveFocusLost),
-		GET_FUNCTION_NAME_CHECKED(UInteractionFunctionalModule_Blueprint, ReceiveInteractorAvailabilityChanged),
+		GET_FUNCTION_NAME_CHECKED(UInteractionFunctionalModule_Blueprint, ReceiveAvailabilityChanged),
 		GET_FUNCTION_NAME_CHECKED(UInteractionFunctionalModule_Blueprint, ReceiveInteractionStarted),
 		GET_FUNCTION_NAME_CHECKED(UInteractionFunctionalModule_Blueprint, ReceiveInteractionFailed),
 		GET_FUNCTION_NAME_CHECKED(UInteractionFunctionalModule_Blueprint, ReceiveInteractionEnded),
@@ -47,6 +47,11 @@ bool UInteractionFunctionalModule_Blueprint::IsImplemented(const EBlueprintEvent
 	return (ImplementedEvents & 1 << static_cast<int32>(Event)) != 0;
 }
 
+bool UInteractionFunctionalModule_Blueprint::SupportsSide(const EInteractionSide Side) const
+{
+	return Side == EInteractionSide::Target ? bRunsOnTarget : bRunsOnInteractor;
+}
+
 EInteractionModuleTickPolicy UInteractionFunctionalModule_Blueprint::GetTickPolicy() const
 {
 	// Only honour the authored policy when a graph is actually there to run. This detects Blueprint overrides only:
@@ -54,82 +59,82 @@ EInteractionModuleTickPolicy UInteractionFunctionalModule_Blueprint::GetTickPoli
 	return IsImplemented(EBlueprintEvent::Tick) ? AuthoredTickPolicy : EInteractionModuleTickPolicy::Never;
 }
 
-void UInteractionFunctionalModule_Blueprint::OnActivated(UInteractionTargetComponent* InteractionTarget, FInstancedStruct& InstanceData) const
+void UInteractionFunctionalModule_Blueprint::OnActivated(const FInteractionModuleContext& Context, FInstancedStruct& InstanceData) const
 {
 	if (IsImplemented(EBlueprintEvent::Activated))
 	{
-		ReceiveActivated(InteractionTarget, InstanceData);
+		ReceiveActivated(Context, InstanceData);
 	}
 }
 
-void UInteractionFunctionalModule_Blueprint::OnDeactivated(UInteractionTargetComponent* InteractionTarget, FInstancedStruct& InstanceData) const
+void UInteractionFunctionalModule_Blueprint::OnDeactivated(const FInteractionModuleContext& Context, FInstancedStruct& InstanceData) const
 {
 	if (IsImplemented(EBlueprintEvent::Deactivated))
 	{
-		ReceiveDeactivated(InteractionTarget, InstanceData);
+		ReceiveDeactivated(Context, InstanceData);
 	}
 }
 
-void UInteractionFunctionalModule_Blueprint::OnCleanup(UInteractionTargetComponent* InteractionTarget, FInstancedStruct& InstanceData) const
+void UInteractionFunctionalModule_Blueprint::OnCleanup(const FInteractionModuleContext& Context, FInstancedStruct& InstanceData) const
 {
 	if (IsImplemented(EBlueprintEvent::Cleanup))
 	{
-		ReceiveCleanup(InteractionTarget, InstanceData);
+		ReceiveCleanup(Context, InstanceData);
 	}
 }
 
-void UInteractionFunctionalModule_Blueprint::OnFocusReceived(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, FInstancedStruct& InstanceData) const
+void UInteractionFunctionalModule_Blueprint::OnFocusReceived(const FInteractionModuleContext& Context, FInstancedStruct& InstanceData) const
 {
 	if (IsImplemented(EBlueprintEvent::FocusReceived))
 	{
-		ReceiveFocusReceived(InteractionTarget, Interactor, InstanceData);
+		ReceiveFocusReceived(Context, InstanceData);
 	}
 }
 
-void UInteractionFunctionalModule_Blueprint::OnFocusLost(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, FInstancedStruct& InstanceData) const
+void UInteractionFunctionalModule_Blueprint::OnFocusLost(const FInteractionModuleContext& Context, FInstancedStruct& InstanceData) const
 {
 	if (IsImplemented(EBlueprintEvent::FocusLost))
 	{
-		ReceiveFocusLost(InteractionTarget, Interactor, InstanceData);
+		ReceiveFocusLost(Context, InstanceData);
 	}
 }
 
-void UInteractionFunctionalModule_Blueprint::OnInteractorAvailabilityChanged(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, const bool bAvailable, FInstancedStruct& InstanceData) const
+void UInteractionFunctionalModule_Blueprint::OnAvailabilityChanged(const FInteractionModuleContext& Context, const bool bAvailable, FInstancedStruct& InstanceData) const
 {
-	if (IsImplemented(EBlueprintEvent::InteractorAvailabilityChanged))
+	if (IsImplemented(EBlueprintEvent::AvailabilityChanged))
 	{
-		ReceiveInteractorAvailabilityChanged(InteractionTarget, Interactor, bAvailable, InstanceData);
+		ReceiveAvailabilityChanged(Context, bAvailable, InstanceData);
 	}
 }
 
-void UInteractionFunctionalModule_Blueprint::OnInteractionStarted(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, const FInstancedStruct& Payload, FInstancedStruct& InstanceData) const
+void UInteractionFunctionalModule_Blueprint::OnInteractionStarted(const FInteractionModuleContext& Context, const FInstancedStruct& Payload, FInstancedStruct& InstanceData) const
 {
 	if (IsImplemented(EBlueprintEvent::InteractionStarted))
 	{
-		ReceiveInteractionStarted(InteractionTarget, Interactor, Payload, InstanceData);
+		ReceiveInteractionStarted(Context, Payload, InstanceData);
 	}
 }
 
-void UInteractionFunctionalModule_Blueprint::OnInteractionFailed(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, const FInstancedStruct& Payload, FInstancedStruct& InstanceData) const
+void UInteractionFunctionalModule_Blueprint::OnInteractionFailed(const FInteractionModuleContext& Context, const FInstancedStruct& Payload, FInstancedStruct& InstanceData) const
 {
 	if (IsImplemented(EBlueprintEvent::InteractionFailed))
 	{
-		ReceiveInteractionFailed(InteractionTarget, Interactor, Payload, InstanceData);
+		ReceiveInteractionFailed(Context, Payload, InstanceData);
 	}
 }
 
-void UInteractionFunctionalModule_Blueprint::OnInteractionEnded(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, const EInteractionEndReason Reason, FInstancedStruct& InstanceData) const
+void UInteractionFunctionalModule_Blueprint::OnInteractionEnded(const FInteractionModuleContext& Context, const EInteractionEndReason Reason, FInstancedStruct& InstanceData) const
 {
 	if (IsImplemented(EBlueprintEvent::InteractionEnded))
 	{
-		ReceiveInteractionEnded(InteractionTarget, Interactor, Reason, InstanceData);
+		ReceiveInteractionEnded(Context, Reason, InstanceData);
 	}
 }
 
-void UInteractionFunctionalModule_Blueprint::OnTick(UInteractionTargetComponent* InteractionTarget, const float DeltaTime, FInstancedStruct& InstanceData) const
+void UInteractionFunctionalModule_Blueprint::OnTick(const FInteractionModuleContext& Context, const float DeltaTime, FInstancedStruct& InstanceData) const
 {
 	if (IsImplemented(EBlueprintEvent::Tick))
 	{
-		ReceiveTick(InteractionTarget, DeltaTime, InstanceData);
+		ReceiveTick(Context, DeltaTime, InstanceData);
 	}
 }

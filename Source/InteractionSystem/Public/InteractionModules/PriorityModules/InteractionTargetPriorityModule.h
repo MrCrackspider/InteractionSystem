@@ -14,7 +14,7 @@ UENUM(BlueprintType)
 enum class EInteractionModuleType : uint8
 {
 	Default	UMETA(Tooltip = "Returned priority will be used to compute MAX value from all available modules"),
-	Logical	UMETA(Tooltip = "Interaction target will never be focused if returned priority is zero or less"),
+	Logical	UMETA(Tooltip = "Interaction target will never be focused if returned priority is zero or less. Any other value passes without adding to the score"),
 	Mixed	UMETA(Tooltip = "Default mode when returned priority is greater than zero and logical mode otherwise"),
 };
 
@@ -47,6 +47,9 @@ public:
 	bool IsEnabled() const { return bEnabled; }
 
 	bool HasLogicalThreshold() const { return Type == EInteractionModuleType::Logical || Type == EInteractionModuleType::Mixed; }
+
+	/** @return whether a score that passes the threshold joins the definition's maximum. A Logical module only vetoes. */
+	bool ContributesToScore() const { return Type != EInteractionModuleType::Logical; }
 
 	/** @return this module's score for the pairing, interpreted according to Type. */
 	virtual float GetPriority(const UInteractionTargetComponent* OwningInteractionTarget, const UInteractorComponent* InteractorComponent) const { return 1.0f; }

@@ -1,5 +1,6 @@
 #pragma once
 #include "InteractionDefinitionReference.h"
+#include "InteractionModuleRuntime.h"
 #include "InteractionModuleTypes.h"
 #include "InteractionTypes.h"
 #include "Components/SceneComponent.h"
@@ -157,9 +158,13 @@ public:
 	/**
 	 * Scores this target for one interactor, which is what focus selection ranks candidates by.
 	 *
-	 * @return the score, or an unset value when the pairing is no candidate at all: this target is deactivated, the
-	 *         pair's conditions do not hold, there is no definition to score with, or a Logical module vetoed it.
-	 *         Unset is not a score of zero, and callers do not have to re-derive the threshold to tell them apart.
+	 * @return the score, or an unset value when the pairing is no candidate at all: this target is deactivated, there
+	 *         is no definition to score with, or a Logical module vetoed it. Unset is not a score of zero, and callers
+	 *         do not have to re-derive the threshold to tell them apart.
+	 *
+	 * The pair's conditions take no part in this unless the scoring definition asks for them with UITPM_ConditionsMet.
+	 * They gate starting an interaction, @see CanInteract, so a target whose conditions fail is still focusable by
+	 * default — which is what lets it say why it cannot be used.
 	 */
 	TOptional<float> RequestPriority(const UInteractorComponent* InteractorComponent) const;
 
@@ -217,7 +222,7 @@ protected:
 	virtual void OnInteractionStarted(UInteractorComponent* InteractorComponent, const FInstancedStruct& Payload);
 	virtual void OnInteractionFailed(UInteractorComponent* InteractorComponent, const FInstancedStruct& Payload);
 	virtual void OnInteractionEnded(UInteractorComponent* InteractorComponent, EInteractionEndReason Reason);
-	virtual void OnInteractorAvailabilityChanged(const UInteractorComponent* InteractorComponent, bool bAvailable);
+	virtual void OnInteractorAvailabilityChanged(UInteractorComponent* InteractorComponent, bool bAvailable);
 
 	UFUNCTION()
 	void OnInteractorActivated(UActorComponent* Component, bool bReset);
@@ -256,11 +261,8 @@ private:
 	FInteractionPerInteractorData* FindPerInteractorData(const UInteractorComponent* InteractorComponent);
 	const FInteractionPerInteractorData* FindPerInteractorData(const UInteractorComponent* InteractorComponent) const;
 
-	/** Builds one instance data slot per module of the cached definition, in the definition's authored order. */
-	void InitializeFunctionalModules();
-
-	/** Deactivates the modules, then drops their instance data. Order matters: teardown needs live state. */
-	void ShutdownFunctionalModules();
+	/** @return the context for a module event, about the pairing with Interactor or, without one, about none. */
+	FInteractionModuleContext MakeModuleContext(UInteractorComponent* Interactor = nullptr);
 
 	/**
 	 * Brings the modules' activation in line with this component, firing OnActivated/OnDeactivated exactly once
@@ -272,23 +274,9 @@ private:
 	/** Registers this component with the tick graph only while the definition's modules ask to be ticked. */
 	void UpdateModuleTickEnabled();
 
-	void TickFunctionalModules(float DeltaTime);
-
-	/** Calls Invoke(Module, InstanceData) for every valid module of the cached definition with its own state. */
-	template <typename TInvokeModule>
-	void ForEachFunctionalModule(TInvokeModule&& Invoke);
-
-	/** As ForEachFunctionalModule, but silent while the modules are not activated. Use this for every event. */
-	template <typename TInvokeModule>
-	void DispatchToActivatedModules(TInvokeModule&& Invoke);
-
-	/** Per-target state of the definition's functional modules, index-parallel to FunctionalModules. */
+	/** The definition's functional modules that run on targets, and this target's state for them. */
 	UPROPERTY(Transient)
-	TArray<FInstancedStruct> ModuleInstanceData;
-
-	EInteractionModuleTickPolicy ModuleTickPolicy = EInteractionModuleTickPolicy::Never;
-
-	bool bModulesActivated = false;
+	FInteractionModuleRuntime ModuleRuntime;
 
 	/** Whether the interactor management module has been started and not stopped since. */
 	bool bManagingInteractors = false;

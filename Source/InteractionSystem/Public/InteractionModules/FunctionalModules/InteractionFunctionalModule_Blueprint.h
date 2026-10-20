@@ -9,15 +9,15 @@
 /**
  * Base for functional modules authored in Blueprint.
  *
- * A Blueprint subclass declares its per-target state by picking a struct type for DefaultInstanceData, whose
- * authored values seed each owning target's copy. Each event hands that copy back by reference, so a graph reads and
+ * A Blueprint subclass declares its per-component state by picking a struct type for DefaultInstanceData, whose
+ * authored values seed each owning component's copy. Each event hands that copy back by reference, so a graph reads and
  * writes it with the Get/Set Instanced Struct Value nodes.
  *
  * Each of those nodes moves the whole struct: Get hands back a copy and Set writes the whole value. One Get and one
  * Set per event is safe; two interleaved pairs built from stale reads will clobber each other, and a helper function
  * graph that also mutates the state has to take the reference as a parameter. Keep state structs small.
  *
- * The events are const because the module is shared by every target using the definition, and that const-ness is
+ * The events are const because the module is shared by every component using the definition, and that const-ness is
  * enforced rather than documented: a const event cannot be placed as a Blueprint event node
  * (@see UEdGraphSchema_K2::FunctionCanBePlacedAsEvent), so an author implements it from Functions > Override, where
  * the Kismet compiler rejects writes to member variables. Keep new events const; a single non-const one silently
@@ -31,29 +31,30 @@ class INTERACTIONSYSTEM_API UInteractionFunctionalModule_Blueprint : public UInt
 public:
 
 	//~ Begin UInteractionFunctionalModule interface
+	virtual bool SupportsSide(EInteractionSide Side) const override;
 	virtual FInstancedStruct CreateInstanceData() const override { return DefaultInstanceData; }
 
 	/**
 	 * Reports the authored policy only when the Blueprint actually implements On Tick, so a module that does not
-	 * tick costs its targets nothing and an author cannot forget to opt out.
+	 * tick costs its owners nothing and an author cannot forget to opt out.
 	 */
 	virtual EInteractionModuleTickPolicy GetTickPolicy() const override;
 
-	virtual void OnActivated(UInteractionTargetComponent* InteractionTarget, FInstancedStruct& InstanceData) const override;
-	virtual void OnDeactivated(UInteractionTargetComponent* InteractionTarget, FInstancedStruct& InstanceData) const override;
-	virtual void OnCleanup(UInteractionTargetComponent* InteractionTarget, FInstancedStruct& InstanceData) const override;
-	virtual void OnFocusReceived(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, FInstancedStruct& InstanceData) const override;
-	virtual void OnFocusLost(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, FInstancedStruct& InstanceData) const override;
-	virtual void OnInteractorAvailabilityChanged(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, bool bAvailable, FInstancedStruct& InstanceData) const override;
-	virtual void OnInteractionStarted(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, const FInstancedStruct& Payload, FInstancedStruct& InstanceData) const override;
-	virtual void OnInteractionFailed(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, const FInstancedStruct& Payload, FInstancedStruct& InstanceData) const override;
-	virtual void OnInteractionEnded(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, EInteractionEndReason Reason, FInstancedStruct& InstanceData) const override;
-	virtual void OnTick(UInteractionTargetComponent* InteractionTarget, float DeltaTime, FInstancedStruct& InstanceData) const override;
+	virtual void OnActivated(const FInteractionModuleContext& Context, FInstancedStruct& InstanceData) const override;
+	virtual void OnDeactivated(const FInteractionModuleContext& Context, FInstancedStruct& InstanceData) const override;
+	virtual void OnCleanup(const FInteractionModuleContext& Context, FInstancedStruct& InstanceData) const override;
+	virtual void OnFocusReceived(const FInteractionModuleContext& Context, FInstancedStruct& InstanceData) const override;
+	virtual void OnFocusLost(const FInteractionModuleContext& Context, FInstancedStruct& InstanceData) const override;
+	virtual void OnAvailabilityChanged(const FInteractionModuleContext& Context, bool bAvailable, FInstancedStruct& InstanceData) const override;
+	virtual void OnInteractionStarted(const FInteractionModuleContext& Context, const FInstancedStruct& Payload, FInstancedStruct& InstanceData) const override;
+	virtual void OnInteractionFailed(const FInteractionModuleContext& Context, const FInstancedStruct& Payload, FInstancedStruct& InstanceData) const override;
+	virtual void OnInteractionEnded(const FInteractionModuleContext& Context, EInteractionEndReason Reason, FInstancedStruct& InstanceData) const override;
+	virtual void OnTick(const FInteractionModuleContext& Context, float DeltaTime, FInstancedStruct& InstanceData) const override;
 	//~ End UInteractionFunctionalModule interface
 
 protected:
 
-	/** Type and initial values of this module's per-target runtime state. Leave unset for a stateless module. */
+	/** Type and initial values of this module's per-component runtime state. Leave unset for a stateless module. */
 	UPROPERTY(EditDefaultsOnly, Category = "Interaction Module")
 	FInstancedStruct DefaultInstanceData;
 
@@ -61,46 +62,55 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Interaction Module")
 	EInteractionModuleTickPolicy AuthoredTickPolicy = EInteractionModuleTickPolicy::WhenInteractorsPresent;
 
-	/** Called when the owning target becomes active, and again after every reactivation. */
+	/** Whether this module runs when placed on an interaction target's definition. */
+	UPROPERTY(EditDefaultsOnly, Category = "Interaction Module")
+	bool bRunsOnTarget = true;
+
+	/** Whether this module runs when placed on an interactor's definition. */
+	UPROPERTY(EditDefaultsOnly, Category = "Interaction Module")
+	bool bRunsOnInteractor = false;
+
+	/** Called when the owning component becomes active, and again after every reactivation. */
 	UFUNCTION(BlueprintImplementableEvent, DisplayName = "On Activated", Category = "Interaction Module")
-	void ReceiveActivated(UInteractionTargetComponent* InteractionTarget, UPARAM(Ref) FInstancedStruct& InstanceData) const;
+	void ReceiveActivated(const FInteractionModuleContext& Context, UPARAM(Ref) FInstancedStruct& InstanceData) const;
 
 	/**
-	 * Called when the owning target stops being active and before it tears down its instance data, so this is the
+	 * Called when the owning component stops being active and before it tears down its instance data, so this is the
 	 * only place anything registered elsewhere — timers, delegate bindings, spawned components — can be released.
 	 * Paired exactly one-to-one with On Activated.
 	 */
 	UFUNCTION(BlueprintImplementableEvent, DisplayName = "On Deactivated", Category = "Interaction Module")
-	void ReceiveDeactivated(UInteractionTargetComponent* InteractionTarget, UPARAM(Ref) FInstancedStruct& InstanceData) const;
+	void ReceiveDeactivated(const FInteractionModuleContext& Context, UPARAM(Ref) FInstancedStruct& InstanceData) const;
 
 	/**
-	 * Called once right before the owning target drops the instance data — when it ends play, or on a reset
+	 * Called once right before the owning component drops the instance data — when it ends play, or on a reset
 	 * activation. Release here what was meant to outlive deactivation, such as a widget still fading out.
 	 */
 	UFUNCTION(BlueprintImplementableEvent, DisplayName = "On Cleanup", Category = "Interaction Module")
-	void ReceiveCleanup(UInteractionTargetComponent* InteractionTarget, UPARAM(Ref) FInstancedStruct& InstanceData) const;
+	void ReceiveCleanup(const FInteractionModuleContext& Context, UPARAM(Ref) FInstancedStruct& InstanceData) const;
 
 	UFUNCTION(BlueprintImplementableEvent, DisplayName = "On Focus Received", Category = "Interaction Module")
-	void ReceiveFocusReceived(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, UPARAM(Ref) FInstancedStruct& InstanceData) const;
+	void ReceiveFocusReceived(const FInteractionModuleContext& Context, UPARAM(Ref) FInstancedStruct& InstanceData) const;
 
 	UFUNCTION(BlueprintImplementableEvent, DisplayName = "On Focus Lost", Category = "Interaction Module")
-	void ReceiveFocusLost(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, UPARAM(Ref) FInstancedStruct& InstanceData) const;
+	void ReceiveFocusLost(const FInteractionModuleContext& Context, UPARAM(Ref) FInstancedStruct& InstanceData) const;
 
-	UFUNCTION(BlueprintImplementableEvent, DisplayName = "On Interactor Availability Changed", Category = "Interaction Module")
-	void ReceiveInteractorAvailabilityChanged(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, bool bAvailable, UPARAM(Ref) FInstancedStruct& InstanceData) const;
+	/** The other party of a pairing became available or stopped being. @see UInteractionFunctionalModule::OnAvailabilityChanged. */
+	UFUNCTION(BlueprintImplementableEvent, DisplayName = "On Availability Changed", Category = "Interaction Module")
+	void ReceiveAvailabilityChanged(const FInteractionModuleContext& Context, bool bAvailable, UPARAM(Ref) FInstancedStruct& InstanceData) const;
 
 	UFUNCTION(BlueprintImplementableEvent, DisplayName = "On Interaction Started", Category = "Interaction Module")
-	void ReceiveInteractionStarted(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, const FInstancedStruct& Payload, UPARAM(Ref) FInstancedStruct& InstanceData) const;
+	void ReceiveInteractionStarted(const FInteractionModuleContext& Context, const FInstancedStruct& Payload, UPARAM(Ref) FInstancedStruct& InstanceData) const;
 
 	UFUNCTION(BlueprintImplementableEvent, DisplayName = "On Interaction Failed", Category = "Interaction Module")
-	void ReceiveInteractionFailed(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, const FInstancedStruct& Payload, UPARAM(Ref) FInstancedStruct& InstanceData) const;
+	void ReceiveInteractionFailed(const FInteractionModuleContext& Context, const FInstancedStruct& Payload, UPARAM(Ref) FInstancedStruct& InstanceData) const;
 
 	UFUNCTION(BlueprintImplementableEvent, DisplayName = "On Interaction Ended", Category = "Interaction Module")
-	void ReceiveInteractionEnded(UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, EInteractionEndReason Reason, UPARAM(Ref) FInstancedStruct& InstanceData) const;
+	void ReceiveInteractionEnded(const FInteractionModuleContext& Context, EInteractionEndReason Reason, UPARAM(Ref) FInstancedStruct& InstanceData) const;
 
 	/** Only reached while the authored tick policy asks for it. */
 	UFUNCTION(BlueprintImplementableEvent, DisplayName = "On Tick", Category = "Interaction Module")
-	void ReceiveTick(UInteractionTargetComponent* InteractionTarget, float DeltaTime, UPARAM(Ref) FInstancedStruct& InstanceData) const;
+	void ReceiveTick(const FInteractionModuleContext& Context, float DeltaTime, UPARAM(Ref) FInstancedStruct& InstanceData) const;
 
 private:
 
@@ -112,7 +122,7 @@ private:
 		Cleanup,
 		FocusReceived,
 		FocusLost,
-		InteractorAvailabilityChanged,
+		AvailabilityChanged,
 		InteractionStarted,
 		InteractionFailed,
 		InteractionEnded,

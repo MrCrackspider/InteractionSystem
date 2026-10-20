@@ -1,5 +1,6 @@
 #pragma once
 #include "InteractionDefinitionReference.h"
+#include "InteractionModuleRuntime.h"
 #include "InteractionTypes.h"
 #include "Components/ActorComponent.h"
 #include "StructUtils/InstancedStruct.h"
@@ -71,7 +72,9 @@ public:
     virtual void BeginPlay() override;
 
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
-    
+
+    virtual void Activate(bool bReset = false) override;
+
     virtual void Deactivate() override;
 
     virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
@@ -150,12 +153,15 @@ protected:
     virtual void OnInteractionTargetAdded(UInteractionTargetComponent* InteractionTarget) {}
     virtual void OnInteractionTargetRemoved(UInteractionTargetComponent* InteractionTarget) {}
 
+    /** A paired target became available — both sides active — or stopped being. Reaches the functional modules. */
+    virtual void OnTargetAvailabilityChanged(UInteractionTargetComponent* InteractionTarget, bool bAvailable);
+
     /**
-     * Requirements this interactor puts on anything it considers interacting with, and the scoring modules used
-     * for a target that has no definition of its own.
+     * Requirements this interactor puts on anything it considers interacting with, the scoring modules used for a
+     * target that has no definition of its own, and behaviour of the interactor's own.
      *
-     * Only Conditions and PriorityModules are read from it. A definition's functional modules describe a target's
-     * behaviour and are ignored here, as is its parameter bag beyond what the conditions and scoring bind to.
+     * Its functional modules run on this interactor — those that support the interactor side; the rest are skipped.
+     * @see UInteractionFunctionalModule::SupportsSide.
      */
     UPROPERTY(EditAnywhere, Category = "Interactor Component")
     FInteractionDefinitionReference Definition;
@@ -178,8 +184,8 @@ private:
     /** Drops every pair, from both sides. */
     void RemoveAllInteractionTargets();
 
-    void BindToInteractionTargetActivation(UInteractionTargetComponent* InteractionTarget) const;
-    void UnbindFromInteractionTargetActivation(UInteractionTargetComponent* InteractionTarget) const;
+    void BindToInteractionTargetActivation(UInteractionTargetComponent* InteractionTarget);
+    void UnbindFromInteractionTargetActivation(UInteractionTargetComponent* InteractionTarget);
 
     /**
      * Activates this interactor's conditions for one pair. Does nothing until the definition has been resolved,
@@ -190,6 +196,19 @@ private:
     void DeactivateConditions(FInteractorPerTargetData& Data);
 
     const FInteractorPerTargetData* FindPerTargetData(const UInteractionTargetComponent* InteractionTarget) const;
+
+    /** @return the context for a module event, about the pairing with InteractionTarget or, without one, about none. */
+    FInteractionModuleContext MakeModuleContext(UInteractionTargetComponent* InteractionTarget = nullptr);
+
+    /** Brings the modules' activation in line with this component. @see UInteractionTargetComponent::UpdateModuleActivation. */
+    void UpdateModuleActivation();
+
+    /** Tells the modules about every paired target at once: all of them gone, or each active one available. */
+    void NotifyPairedTargetsAvailability(bool bAvailable);
+
+    /** The definition's functional modules that run on interactors, and this interactor's state for them. */
+    UPROPERTY(Transient)
+    FInteractionModuleRuntime ModuleRuntime;
 
     bool bInteracting = false;
 

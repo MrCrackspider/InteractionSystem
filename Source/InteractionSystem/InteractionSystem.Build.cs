@@ -26,8 +26,10 @@ public class InteractionSystem : ModuleRules
 			{
 				"Core", 
 				"CoreUObject", 
-				"WorldConditions", 
-				"PropertyBindingUtils"
+				"WorldConditions",
+				"PropertyBindingUtils",
+				// Public: ITFM_InteractOnInput.h names ETriggerEvent in a UPROPERTY.
+				"EnhancedInput"
 			}
             );
 			
