@@ -91,6 +91,16 @@ protected:
 	virtual FWorldConditionResult IsTrue(const FWorldConditionContext& Context) const override;
 	virtual void Deactivate(const FWorldConditionContext& Context) const override;
 
+public:
+
+	/**
+	 * An authored reason speaks for the whole nested set, so a reusable requirement can be summed up where it is used.
+	 * Without one, the nested conditions that refuse give their own.
+	 */
+	virtual void AppendBlockReasons(const FWorldConditionContext& Context, TArray<FInteractionBlockReason>& OutReasons) const override;
+
+protected:
+
 	FWorldConditionContextDataRef InteractorRef;
 	FWorldConditionContextDataRef InteractionTargetRef;
 

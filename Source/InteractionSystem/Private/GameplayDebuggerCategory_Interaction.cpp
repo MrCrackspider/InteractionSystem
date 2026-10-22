@@ -66,24 +66,46 @@ namespace UE::Interaction::Debugger::Private
 		FString ModuleScores;
 
 		/**
-		 * Whose conditions would refuse an interaction started now. Empty when neither side's would. Independent of
-		 * focus: conditions only keep a target out of focus through a Conditions Met module, which shows in the scores.
+		 * Why an interaction started now would be refused. Empty when it would not. Independent of focus: conditions
+		 * only keep a target out of focus through a Conditions Met module, which shows in the scores.
 		 */
 		FString StartRefusal;
 	};
+
+	/** One block reason as a developer wants it: whose, which condition, and what the player would be told. */
+	FString DescribeBlockReason(const FInteractionBlockReason& Reason)
+	{
+		FString Description = FString::Printf(TEXT("%s %s"),
+			Reason.Side == EInteractionSide::Target ? TEXT("Target") : TEXT("Interactor"), *Reason.DebugDescription);
+
+		if (Reason.Tag.IsValid())
+		{
+			Description += FString::Printf(TEXT(" [%s]"), *Reason.Tag.ToString());
+		}
+
+		if (!Reason.Text.IsEmpty())
+		{
+			Description += FString::Printf(TEXT(" \"%s\""), *Reason.Text.ToString());
+		}
+
+		return Description;
+	}
 
 	FCandidateReport Evaluate(const UInteractorComponent& Interactor, const UInteractionTargetComponent& Target)
 	{
 		FCandidateReport Report;
 
-		// The same pair of checks UInteractionTargetComponent::CanInteract makes, target first.
-		if (!Target.AreConditionsMet(&Interactor))
+		// The same call a UI would make, which mirrors UInteractionTargetComponent::CanInteract.
+		TArray<FInteractionBlockReason> BlockReasons;
+		if (Target.GetBlockReasons(&Interactor, BlockReasons))
 		{
-			Report.StartRefusal = TEXT("Target's conditions");
-		}
-		else if (!Interactor.AreConditionsMet(&Target))
-		{
-			Report.StartRefusal = TEXT("Interactor's conditions");
+			TArray<FString> Descriptions;
+			for (const FInteractionBlockReason& Reason : BlockReasons)
+			{
+				Descriptions.Add(DescribeBlockReason(Reason));
+			}
+
+			Report.StartRefusal = Descriptions.IsEmpty() ? FString(TEXT("target inactive or pair not registered")) : FString::Join(Descriptions, TEXT(", "));
 		}
 
 		Report.Priority = Target.RequestPriority(&Interactor);

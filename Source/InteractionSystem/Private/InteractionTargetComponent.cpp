@@ -218,6 +218,48 @@ bool UInteractionTargetComponent::CanInteract(const UInteractorComponent* Intera
 	return Interactor == nullptr || Interactor->AreConditionsMet(this);
 }
 
+bool UInteractionTargetComponent::GetBlockReasons(const UInteractorComponent* Interactor, TArray<FInteractionBlockReason>& OutReasons) const
+{
+	OutReasons.Reset();
+
+	// Mirrors CanInteract, so the answer cannot disagree with what a start would do.
+	if (!IsActive())
+	{
+		return true;
+	}
+
+	const bool bTargetRefuses = !AreConditionsMet(Interactor);
+	if (bTargetRefuses)
+	{
+		AppendConditionBlockReasons(Interactor, OutReasons);
+	}
+
+	const bool bInteractorRefuses = Interactor != nullptr && !Interactor->AreConditionsMet(this);
+	if (bInteractorRefuses)
+	{
+		Interactor->AppendConditionBlockReasons(this, OutReasons);
+	}
+
+	return bTargetRefuses || bInteractorRefuses;
+}
+
+void UInteractionTargetComponent::AppendConditionBlockReasons(const UInteractorComponent* Interactor, TArray<FInteractionBlockReason>& OutReasons) const
+{
+	const FInteractionPerInteractorData* Data = FindPerInteractorData(Interactor);
+	if (CachedDefinition == nullptr || Data == nullptr)
+	{
+		return;
+	}
+
+	const int32 FirstReason = OutReasons.Num();
+	Data->ConditionState.AppendBlockReasons(this, Interactor, OutReasons);
+
+	for (int32 Index = FirstReason; Index < OutReasons.Num(); Index++)
+	{
+		OutReasons[Index].Side = EInteractionSide::Target;
+	}
+}
+
 TArray<UInteractorComponent*> UInteractionTargetComponent::GetInteractors() const
 {
 	TArray<UInteractorComponent*> Result;

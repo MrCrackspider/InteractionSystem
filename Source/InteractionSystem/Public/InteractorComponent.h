@@ -100,6 +100,12 @@ public:
      */
     bool AreConditionsMet(const UInteractionTargetComponent* InteractionTarget) const;
 
+    /**
+     * Appends the reasons this interactor's own conditions refuse the pair, with Side set.
+     * @see UInteractionTargetComponent::GetBlockReasons, which collects both sides.
+     */
+    void AppendConditionBlockReasons(const UInteractionTargetComponent* InteractionTarget, TArray<FInteractionBlockReason>& OutReasons) const;
+
     UFUNCTION(BlueprintPure)
     APlayerController* GetOwningPlayerController() const;
 

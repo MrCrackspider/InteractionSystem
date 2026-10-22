@@ -9,6 +9,7 @@
 class UInteractionTargetComponent;
 class UInteractionWorldConditionSchema;
 class UInteractorComponent;
+struct FInteractionBlockReason;
 
 /**
  * Condition state of one interaction target / interactor pair.
@@ -54,6 +55,18 @@ struct FInteractionConditionState
 
 	/** @return the value of the query for this pair, cached where the conditions allow it. */
 	INTERACTIONSYSTEM_API bool IsTrue(const UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor) const;
+
+	/**
+	 * Appends a reason for each condition that decides the query's failure, in authored order. Appends nothing when
+	 * the query passes or the state was never activated.
+	 *
+	 * "Decides" follows the expression: a false operand of a false And is blamed, every operand of a false Or is, and
+	 * a false condition inside a group that holds anyway is not. Conditions with a cached result are not
+	 * re-evaluated; the rest are, so this costs about one IsTrue.
+	 *
+	 * Side is left for the caller to fill: the state does not know whose definition it was activated from.
+	 */
+	INTERACTIONSYSTEM_API void AppendBlockReasons(const UInteractionTargetComponent* InteractionTarget, const UInteractorComponent* Interactor, TArray<FInteractionBlockReason>& OutReasons) const;
 
 private:
 

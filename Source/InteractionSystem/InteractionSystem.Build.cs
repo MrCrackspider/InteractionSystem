@@ -28,6 +28,8 @@ public class InteractionSystem : ModuleRules
 				"CoreUObject", 
 				"WorldConditions",
 				"PropertyBindingUtils",
+				// Public: FInteractionBlockReason carries a gameplay tag.
+				"GameplayTags",
 				// Public: ITFM_InteractOnInput.h names ETriggerEvent in a UPROPERTY.
 				"EnhancedInput"
 			}

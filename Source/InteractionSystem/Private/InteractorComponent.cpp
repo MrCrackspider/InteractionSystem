@@ -291,6 +291,23 @@ bool UInteractorComponent::AreConditionsMet(const UInteractionTargetComponent* I
 	return Data->ConditionState.IsTrue(InteractionTarget, this);
 }
 
+void UInteractorComponent::AppendConditionBlockReasons(const UInteractionTargetComponent* InteractionTarget, TArray<FInteractionBlockReason>& OutReasons) const
+{
+	const FInteractorPerTargetData* Data = FindPerTargetData(InteractionTarget);
+	if (CachedDefinition == nullptr || Data == nullptr)
+	{
+		return;
+	}
+
+	const int32 FirstReason = OutReasons.Num();
+	Data->ConditionState.AppendBlockReasons(InteractionTarget, this, OutReasons);
+
+	for (int32 Index = FirstReason; Index < OutReasons.Num(); Index++)
+	{
+		OutReasons[Index].Side = EInteractionSide::Interactor;
+	}
+}
+
 UInteractorComponent* UInteractorComponent::FindInteractorComponent(const AActor* Actor)
 {
 	if (Actor == nullptr)

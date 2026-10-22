@@ -139,4 +139,31 @@ void FInteractionWorldConditionNestedDefinition::Deactivate(const FWorldConditio
 	State.bActivated = false;
 }
 
+void FInteractionWorldConditionNestedDefinition::AppendBlockReasons(const FWorldConditionContext& Context, TArray<FInteractionBlockReason>& OutReasons) const
+{
+	if (!BlockReason.IsAuthored() && Definition != nullptr)
+	{
+		const FStateType& State = Context.GetState(*this);
+		const UE::Interaction::FScopedDefinitionRecursion ScopedDefinition(UE::Interaction::Private::ConditionDefinitions, Definition);
+
+		if (State.bActivated && !ScopedDefinition.IsCycle())
+		{
+			const UInteractionTargetComponent* InteractionTarget = Context.GetContextDataPtr<UInteractionTargetComponent>(InteractionTargetRef);
+			const UInteractorComponent* Interactor = Context.GetContextDataPtr<UInteractorComponent>(InteractorRef);
+
+			const int32 FirstReason = OutReasons.Num();
+			State.ConditionState.AppendBlockReasons(InteractionTarget, Interactor, OutReasons);
+
+			// Nothing found inside when this condition is inverted — the nested query holds, which is the refusal —
+			// or when activation failed. Either way the refusal is this condition's own.
+			if (OutReasons.Num() > FirstReason)
+			{
+				return;
+			}
+		}
+	}
+
+	Super::AppendBlockReasons(Context, OutReasons);
+}
+
 #undef LOCTEXT_NAMESPACE

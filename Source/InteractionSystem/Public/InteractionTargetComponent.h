@@ -6,6 +6,7 @@
 #include "Components/SceneComponent.h"
 #include "Misc/Optional.h"
 #include "StructUtils/InstancedStruct.h"
+#include "WorldConditions/InteractionBlockReason.h"
 #include "WorldConditions/InteractionConditionState.h"
 
 #include "InteractionTargetComponent.generated.h"
@@ -133,6 +134,23 @@ public:
 	 * cached and that silently grants permission whenever it forgets to call its parent.
 	 */
 	virtual bool CanInteract(const UInteractorComponent* Interactor, const FInstancedStruct& Payload) const;
+
+	/**
+	 * Says why Interactor may not start an interaction with this target right now: the reasons of every condition, on
+	 * either side, that decides the refusal — target's first, then the interactor's. Unlike CanInteract it does not
+	 * stop at the first side that refuses, so the UI gets the whole list.
+	 *
+	 * @return whether starting is refused. Refused with no reasons means the refusal is not a condition's — this target
+	 *         is inactive, or the pair is not registered.
+	 *
+	 * Re-evaluates whatever cannot be cached, so it is for when a reason is about to be shown — on focus, on a refused
+	 * start — not for every candidate each tick.
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintPure = false, Category = "InteractionTarget")
+	bool GetBlockReasons(const UInteractorComponent* Interactor, TArray<FInteractionBlockReason>& OutReasons) const;
+
+	/** Appends the reasons this target's own conditions refuse Interactor, with Side set. @see GetBlockReasons. */
+	void AppendConditionBlockReasons(const UInteractorComponent* Interactor, TArray<FInteractionBlockReason>& OutReasons) const;
 
 	UFUNCTION(BlueprintPure)
 	TArray<UInteractorComponent*> GetInteractors() const;
